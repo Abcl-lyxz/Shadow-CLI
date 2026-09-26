@@ -164,12 +164,14 @@ func TestFixtureRecordUnknownWriteRecoveredWithoutReplay(t *testing.T) {
 	var present atomic.Bool
 	var posts, deletes atomic.Int32
 	release := make(chan struct{})
+	started := make(chan struct{})
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		switch r.Method {
 		case http.MethodPost:
 			posts.Add(1)
 			present.Store(true)
+			close(started)
 			<-release
 			w.WriteHeader(http.StatusCreated)
 		case http.MethodDelete:
@@ -186,12 +188,20 @@ func TestFixtureRecordUnknownWriteRecoveredWithoutReplay(t *testing.T) {
 		}
 	}))
 	defer server.Close()
+	defer func() {
+		select {
+		case <-release:
+		default:
+			close(release)
+		}
+	}()
 	path := filepath.Join(t.TempDir(), "shadow.db")
 	key := bytes.Repeat([]byte{0x62}, 32)
 	st, err := store.OpenWithEvidenceKey(path, key)
 	if err != nil {
 		t.Fatal(err)
 	}
+	defer st.Close()
 	write, read := fixtureRecordRules(server.URL)
 	rules := []policy.ActionRule{write, read}
 	scope, _ := policy.FromTarget(server.URL)
@@ -203,9 +213,26 @@ func TestFixtureRecordUnknownWriteRecoveredWithoutReplay(t *testing.T) {
 		t.Fatal(err)
 	}
 	id := FixtureWriteActionID(write)
-	deadline, cancel := context.WithTimeout(ctx, 40*time.Millisecond)
-	actionID, presenceID, err := network.WriteRecord(deadline, id)
-	cancel()
+	requestCtx, cancel := context.WithCancel(ctx)
+	defer cancel()
+	type writeResult struct {
+		actionID, presenceID int64
+		err                  error
+	}
+	finished := make(chan writeResult, 1)
+	go func() {
+		actionID, presenceID, err := network.WriteRecord(requestCtx, id)
+		finished <- writeResult{actionID, presenceID, err}
+	}()
+	select {
+	case <-started:
+		cancel()
+	case <-time.After(10 * time.Second):
+		cancel()
+		t.Fatal("write did not reach fixture server")
+	}
+	result := <-finished
+	actionID, presenceID, err := result.actionID, result.presenceID, result.err
 	close(release)
 	if err == nil || actionID == 0 || presenceID != 0 || posts.Load() != 1 {
 		t.Fatalf("write uncertainty not journaled: action=%d presence=%d posts=%d err=%v", actionID, presenceID, posts.Load(), err)

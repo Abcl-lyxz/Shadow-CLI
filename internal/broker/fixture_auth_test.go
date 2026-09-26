@@ -176,10 +176,12 @@ func TestFixtureAuthenticationRejectsCookieScopeRedirectAndTimeout(t *testing.T)
 		t.Run(tc.name, func(t *testing.T) {
 			var logins, reads atomic.Int32
 			release := make(chan struct{})
+			started := make(chan struct{})
 			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 				if r.URL.Path == "/login" {
 					logins.Add(1)
 					if tc.wait {
+						close(started)
 						<-release
 						return
 					}
@@ -196,6 +198,7 @@ func TestFixtureAuthenticationRejectsCookieScopeRedirectAndTimeout(t *testing.T)
 				w.WriteHeader(http.StatusOK)
 			}))
 			defer server.Close()
+			defer close(release)
 			st, err := store.OpenWithEvidenceKey(filepath.Join(t.TempDir(), "shadow.db"), bytes.Repeat([]byte{0x23}, 32))
 			if err != nil {
 				t.Fatal(err)
@@ -204,15 +207,24 @@ func TestFixtureAuthenticationRejectsCookieScopeRedirectAndTimeout(t *testing.T)
 			network, auth, read := authFixtureRun(t, server, "run", st)
 			authID := FixtureAuthActionID(auth)
 			setAuthCredential(t, st, "run", server.URL, authID, "secret-192")
-			ctx := context.Background()
+			var authErr error
 			if tc.wait {
-				var cancel context.CancelFunc
-				ctx, cancel = context.WithTimeout(ctx, 30*time.Millisecond)
+				ctx, cancel := context.WithCancel(context.Background())
 				defer cancel()
+				finished := make(chan error, 1)
+				go func() { finished <- network.Authenticate(ctx, authID) }()
+				select {
+				case <-started:
+					cancel()
+				case <-time.After(10 * time.Second):
+					cancel()
+					t.Fatal("authentication did not reach fixture server")
+				}
+				authErr = <-finished
+			} else {
+				authErr = network.Authenticate(context.Background(), authID)
 			}
-			err = network.Authenticate(ctx, authID)
-			close(release)
-			if err == nil {
+			if authErr == nil {
 				t.Fatal("invalid authentication established a session")
 			}
 			if _, _, err := network.ReadAuthenticated(context.Background(), authID, ReadActionID(read)); err == nil {

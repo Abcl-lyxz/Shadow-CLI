@@ -142,6 +142,21 @@ func TestTraceViewDoesNotRenderEventPayloadAndFitsSmallTerminal(t *testing.T) {
 	}
 }
 
+func TestKeyboardPaneNavigationInCompactView(t *testing.T) {
+	m := &Model{width: 28, height: 8, lines: []string{"ready"}}
+	m.Update(tea.KeyPressMsg(tea.Key{Code: tea.KeyTab}))
+	if m.pane != "board" {
+		t.Fatalf("Tab selected %q", m.pane)
+	}
+	m.Update(tea.KeyPressMsg(tea.Key{Code: tea.KeyEscape}))
+	if m.pane != "log" {
+		t.Fatalf("Esc selected %q", m.pane)
+	}
+	if strings.Contains(m.View().Content, "Store unavailable") {
+		t.Fatal("log still displays board contents")
+	}
+}
+
 func TestTUIRemovesTerminalControlsFromUntrustedText(t *testing.T) {
 	m := &Model{width: 40, height: 8}
 	m.add("answer \x1b[2Jsecret\x07")
