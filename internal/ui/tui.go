@@ -8,6 +8,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -335,12 +336,28 @@ func (m *Model) handle(input string) {
 		fields := strings.Fields(input)
 		switch fields[0] {
 		case "/help":
-			m.add("/connect [provider [base-url]]  /models [id|refresh|probe]  /price INPUT OUTPUT  /target URL  /attach DIR  /artifact FILE  /scope  /board  /trace  /memory  /findings  /budget  /skills  /agents [run-id]  /recover ID  /review ID ROLE OUTCOME  /resume ID original-task  /dashboard  /pause  /stop  /quit")
-			m.add("Tab: next view; Ctrl+R: refresh view; Esc: log; Ctrl+P: pause. Paused jobs require review before /resume.")
+			m.add("Setup: /connect [search TEXT|provider [base-url]]; /models [search TEXT|id|refresh|probe]; /price IN OUT")
+			m.add("Scope: /target URL; /scope; /attach DIR; /artifact FILE; /skills")
+			m.add("Views: /board; /trace; /memory; /findings; /budget; /agents [run-id]; /dashboard")
+			m.add("Control: /pause; /stop; /recover ID; /review ID ROLE OUTCOME; /resume ID original-task; /quit")
+			m.add("Keys: Tab next view; Ctrl+R refresh; Esc log; Ctrl+P pause. Resume requires outcome review.")
 		case "/connect":
 			if len(fields) == 1 {
 				m.add("Providers: " + joinProviders(m.catalog.Search("", 18)))
-				m.add("Use /connect <provider>. For custom providers: /connect <id> <https-base-url>.")
+				m.add("Use /connect search TEXT, /connect <provider>, or /connect <id> <https-base-url>.")
+				return
+			}
+			if fields[1] == "search" {
+				if len(fields) < 3 {
+					m.add("Usage: /connect search TEXT")
+					return
+				}
+				matches := m.catalog.Search(strings.Join(fields[2:], " "), 30)
+				if len(matches) == 0 {
+					m.add("No matching catalog providers.")
+				} else {
+					m.add("Matching providers: " + joinProviders(matches))
+				}
 				return
 			}
 			id := fields[1]
@@ -364,6 +381,39 @@ func (m *Model) handle(input string) {
 			m.verifiedToolRoute = config.Route{}
 			m.add("Enter API key for " + id + " (input hidden):")
 		case "/models":
+			if len(fields) > 1 && fields[1] == "search" {
+				if len(fields) < 3 {
+					m.add("Usage: /models search TEXT")
+					return
+				}
+				query := strings.ToLower(strings.Join(fields[2:], " "))
+				seen := map[string]bool{}
+				if p, ok := m.catalog[m.cfg.Route.Provider]; ok {
+					for _, id := range p.ToolModels() {
+						if strings.Contains(strings.ToLower(id), query) {
+							seen[id] = true
+						}
+					}
+				}
+				if sameEndpoint(m.endpointRoute, m.cfg.Route) {
+					for id := range m.endpointModels {
+						if strings.Contains(strings.ToLower(id), query) {
+							seen[id] = true
+						}
+					}
+				}
+				var matches []string
+				for id := range seen {
+					matches = append(matches, id)
+				}
+				sort.Strings(matches)
+				if len(matches) == 0 {
+					m.add("No matching tool-capable catalog or endpoint models.")
+				} else {
+					m.add("Matching models: " + strings.Join(limitStrings(matches, 30), ", "))
+				}
+				return
+			}
 			if len(fields) > 1 && fields[1] == "probe" {
 				if m.cfg.Route.Model == "" {
 					m.add("Select a model before probing its tool capability.")

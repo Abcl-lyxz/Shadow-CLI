@@ -58,6 +58,25 @@ func TestModelsCommandStillListsCatalogModels(t *testing.T) {
 	}
 }
 
+func TestProviderAndToolModelSearch(t *testing.T) {
+	m := &Model{cfg: config.Config{Route: config.Route{Provider: "alpha"}}, catalog: catalog.Catalog{
+		"alpha": {ID: "alpha", Name: "Alpha API", Models: map[string]catalog.Model{"qwen-one": {ToolCall: true}, "other": {ToolCall: false}}},
+		"beta":  {ID: "beta", Name: "Beta API"},
+	}}
+	m.handle("/connect search alpha")
+	if !strings.Contains(m.lines[len(m.lines)-1], "alpha") || strings.Contains(m.lines[len(m.lines)-1], "beta") {
+		t.Fatalf("provider search %v", m.lines)
+	}
+	m.handle("/models search qwen")
+	if !strings.Contains(m.lines[len(m.lines)-1], "qwen-one") {
+		t.Fatalf("model search %v", m.lines)
+	}
+	m.handle("/models search other")
+	if !strings.Contains(m.lines[len(m.lines)-1], "No matching") {
+		t.Fatalf("non-tool model was listed: %v", m.lines)
+	}
+}
+
 func TestCapabilityGateUsesFreshCatalogOrRouteBoundProbe(t *testing.T) {
 	route := config.Route{Provider: "fixture", Model: "model-one", BaseURL: "https://fixture.test/v1", Protocol: "openai-chat"}
 	m := &Model{cfg: config.Config{Route: route}, catalog: catalog.Catalog{"fixture": catalog.Provider{API: route.BaseURL, Models: map[string]catalog.Model{"model-one": {ToolCall: true}}}}, catalogAt: time.Now()}
@@ -122,13 +141,16 @@ func TestTraceViewDoesNotRenderEventPayloadAndFitsSmallTerminal(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer st.Close()
+	if err := st.Append(context.Background(), "run-one", "network_decision", map[string]any{"method": "GET", "allowed": false, "url_sha256": "sensitive-hash"}); err != nil {
+		t.Fatal(err)
+	}
 	if err := st.Append(context.Background(), "run-one", "tool", map[string]any{"secret": "sensitive-payload"}); err != nil {
 		t.Fatal(err)
 	}
 	m := &Model{store: st, currentRunID: "run-one", width: 38, height: 9, lines: []string{"log"}}
 	m.handle("/trace")
 	view := m.View().Content
-	if strings.Contains(view, "sensitive-payload") || !strings.Contains(view, "tool") {
+	if strings.Contains(view, "sensitive-payload") || strings.Contains(view, "sensitive-hash") || !strings.Contains(view, "GET denied") || !strings.Contains(view, "tool") {
 		t.Fatalf("unsafe trace view: %s", view)
 	}
 	for _, line := range strings.Split(view, "\n") {

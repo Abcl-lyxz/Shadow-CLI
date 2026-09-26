@@ -146,7 +146,19 @@ func (m *Model) showPane(name string) {
 			return
 		}
 		for _, event := range events {
-			m.paneLines = append(m.paneLines, fmt.Sprintf("#%d  %s  %s", event.ID, event.At.Local().Format("15:04:05"), safeStatus(event.Kind)))
+			line := fmt.Sprintf("#%d  %s  %s", event.ID, safeStatus(event.Kind), event.At.Local().Format("15:04:05"))
+			if event.Kind == "network_decision" {
+				result := "unknown"
+				if event.Allowed != nil {
+					if *event.Allowed {
+						result = "allowed"
+					} else {
+						result = "denied"
+					}
+				}
+				line = fmt.Sprintf("#%d  %s %s  %s", event.ID, safeStatus(event.Method), result, event.At.Local().Format("15:04:05"))
+			}
+			m.paneLines = append(m.paneLines, line)
 		}
 		if len(events) == 0 {
 			m.paneLines = append(m.paneLines, "No events recorded.")

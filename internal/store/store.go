@@ -26,6 +26,8 @@ type Event struct {
 	At      time.Time       `json:"at"`
 	Kind    string          `json:"kind"`
 	Payload json.RawMessage `json:"payload"`
+	Method  string          `json:"method,omitempty"`
+	Allowed *bool           `json:"allowed,omitempty"`
 }
 
 type Run struct {
