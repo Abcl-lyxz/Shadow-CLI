@@ -76,6 +76,11 @@ Updated: 2026-09-26. This is the source of truth for the next development sessio
 - Initial GitHub CI on `main` passed Linux, macOS, and Docker integration, but Windows failed its format step because checkout converted Go files to CRLF. `.gitattributes` now keeps Go and build scripts at LF on all platforms; the workflow also prints unformatted filenames on failure. This is a CI checkout correction, not a change to product behavior.
 - No test write was dispatched. No live target or real provider was contacted. Cross-platform runtime, real cleanup execution, and semantic cleanup verification remain open.
 
+## GitHub handoff (2026-09-26)
+
+- Repository: `https://github.com/Abcl-lyxz/Shadow-CLI`, branch `main`. The initial development snapshot was published as `45425d1`; the Windows CI checkout fix was published as `ea9a4b9`. The checkout tracks `origin/main`.
+- GitHub Actions run `36211485992` for `ea9a4b9` passed all four jobs: Go format/test/vet/build on Windows, macOS, and Linux, plus Docker isolation and fake-provider agent integration on Linux. This is CI validation of the development snapshot, not a production release. No live target was tested.
+
 ## Release gates still open
 
 1. Scope-controlled network gateway for web/API work: an internal loopback fixture dispatcher now applies the action classifier to reads. It is not attached to agent tools, and no write dispatcher exists. Egress enforcement across every tool, real cleanup execution and semantic verification, and a full negative-policy suite remain. Current no-network agent cannot pentest a live website.
