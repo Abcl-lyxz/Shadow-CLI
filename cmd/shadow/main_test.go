@@ -5,6 +5,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -59,11 +60,11 @@ func TestDataTestActionsShowsPendingObligationWithoutRawRoutes(t *testing.T) {
 		t.Fatal(err)
 	}
 	ctx := context.Background()
-	if err := st.Append(ctx, "run-1", "started", map[string]string{"scope": "http://fixture.test"}); err != nil {
-		t.Fatal(err)
-	}
 	scope, _ := policy.FromTarget("http://fixture.test")
 	rule := policy.ActionRule{URL: scope.Origin + "/markers?token=private", Method: "POST", Effect: policy.EffectTestWrite, Resource: "shadow_marker_1", CleanupURL: scope.Origin + "/markers/shadow_marker_1?token=private", CleanupMethod: "DELETE"}
+	if err := st.StartRun(ctx, "run-1", scope, []policy.ActionRule{rule}); err != nil {
+		t.Fatal(err)
+	}
 	p, err := policy.NewActionPolicy(scope, []policy.ActionRule{rule})
 	if err != nil {
 		t.Fatal(err)
@@ -100,4 +101,75 @@ func TestDataTestActionsShowsPendingObligationWithoutRawRoutes(t *testing.T) {
 			t.Fatalf("raw route leaked: %s", output)
 		}
 	}
+}
+
+func TestDataReviewAcknowledgesOnlyObservedState(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "shadow.db")
+	st, err := store.Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx := context.Background()
+	scope, _ := policy.FromTarget("http://fixture.test")
+	rule := policy.ActionRule{URL: scope.Origin + "/markers?token=private", Method: "POST", Effect: policy.EffectTestWrite, Resource: "shadow_marker_1", CleanupURL: scope.Origin + "/markers/shadow_marker_1?token=private", CleanupMethod: "DELETE"}
+	if err := st.StartRun(ctx, "run-1", scope, []policy.ActionRule{rule}); err != nil {
+		t.Fatal(err)
+	}
+	p, err := policy.NewActionPolicy(scope, []policy.ActionRule{rule})
+	if err != nil {
+		t.Fatal(err)
+	}
+	id, err := st.PlanTestWrite(ctx, "run-1", p.Classify(rule.Method, rule.URL))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := st.MarkTestWritePossible(ctx, "run-1", id); err != nil {
+		t.Fatal(err)
+	}
+	actions, err := st.TestActions(ctx, "run-1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := st.Close(); err != nil {
+		t.Fatal(err)
+	}
+	state := strconv.FormatInt(actions[0].StateEventID, 10)
+	action := strconv.FormatInt(id, 10)
+	if err := dataCommandAt(path, []string{"review-test-action", "run-1", action, "--state", "0"}); err == nil {
+		t.Fatal("invalid review confirmation accepted")
+	}
+	scopeOutput := captureDataCommand(t, path, []string{"scope", "run-1"})
+	before := captureDataCommand(t, path, []string{"test-actions", "run-1"})
+	if !strings.Contains(before, "review=required") || !strings.Contains(before, "state-event="+state) {
+		t.Fatalf("review flow missing current state: %s", before)
+	}
+	reviewOutput := captureDataCommand(t, path, []string{"review-test-action", "run-1", action, "--state", state})
+	after := captureDataCommand(t, path, []string{"test-actions", "run-1"})
+	if !strings.Contains(after, "review=acknowledged") || !strings.Contains(after, store.TestActionWritePossible) || !strings.Contains(reviewOutput, "Cleanup remains unresolved") {
+		t.Fatalf("review closed obligation or was not shown: %s %s", reviewOutput, after)
+	}
+	for _, output := range []string{scopeOutput, before, reviewOutput, after} {
+		if strings.Contains(output, "token=private") || strings.Contains(output, "/markers") {
+			t.Fatalf("raw route leaked: %s", output)
+		}
+	}
+}
+
+func captureDataCommand(t *testing.T, path string, args []string) string {
+	t.Helper()
+	r, w, err := os.Pipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	previous := os.Stdout
+	os.Stdout = w
+	commandErr := dataCommandAt(path, args)
+	os.Stdout = previous
+	w.Close()
+	output, readErr := io.ReadAll(r)
+	r.Close()
+	if commandErr != nil || readErr != nil {
+		t.Fatalf("data %v: %v %v", args, commandErr, readErr)
+	}
+	return string(output)
 }

@@ -55,18 +55,26 @@ func Open(path string) (*Store, error) {
 		"PRAGMA foreign_keys=ON",
 		"CREATE TABLE IF NOT EXISTS events (id INTEGER PRIMARY KEY AUTOINCREMENT, run_id TEXT NOT NULL, at TEXT NOT NULL, kind TEXT NOT NULL, payload BLOB NOT NULL)",
 		"CREATE INDEX IF NOT EXISTS idx_events_run ON events(run_id,id)",
+		"CREATE TABLE IF NOT EXISTS run_snapshots (run_id TEXT PRIMARY KEY, origin TEXT NOT NULL, actions BLOB NOT NULL, created_at TEXT NOT NULL)",
+		"CREATE TRIGGER IF NOT EXISTS immutable_run_snapshot BEFORE UPDATE ON run_snapshots BEGIN SELECT RAISE(ABORT, 'run snapshot is immutable'); END",
 		"CREATE TABLE IF NOT EXISTS memories (id INTEGER PRIMARY KEY AUTOINCREMENT, scope TEXT NOT NULL, agent TEXT NOT NULL, topic TEXT NOT NULL, summary TEXT NOT NULL, source_event_id INTEGER NOT NULL REFERENCES events(id), created_at TEXT NOT NULL)",
 		"CREATE INDEX IF NOT EXISTS idx_memories_scope ON memories(scope,id)",
 		"CREATE TABLE IF NOT EXISTS evidence (event_id INTEGER PRIMARY KEY REFERENCES events(id), run_id TEXT NOT NULL, nonce BLOB NOT NULL, ciphertext BLOB NOT NULL, sha256 TEXT NOT NULL, created_at TEXT NOT NULL)",
 		"CREATE TABLE IF NOT EXISTS findings (id INTEGER PRIMARY KEY AUTOINCREMENT, run_id TEXT NOT NULL, title TEXT NOT NULL, asset TEXT NOT NULL, claim_type TEXT NOT NULL, status TEXT NOT NULL, source_event_id INTEGER NOT NULL REFERENCES evidence(event_id), reproduction_event_id INTEGER REFERENCES evidence(event_id), created_at TEXT NOT NULL)",
 		"CREATE INDEX IF NOT EXISTS idx_findings_run ON findings(run_id,id)",
-		"CREATE TABLE IF NOT EXISTS test_actions (id INTEGER PRIMARY KEY AUTOINCREMENT, run_id TEXT NOT NULL, origin TEXT NOT NULL, resource TEXT NOT NULL, method TEXT NOT NULL, url_sha256 TEXT NOT NULL, cleanup_method TEXT NOT NULL, cleanup_url_sha256 TEXT NOT NULL, status TEXT NOT NULL, planned_event_id INTEGER NOT NULL REFERENCES events(id), write_event_id INTEGER REFERENCES events(id), cleanup_event_id INTEGER REFERENCES events(id), observation_event_id INTEGER REFERENCES evidence(event_id))",
+		"CREATE TABLE IF NOT EXISTS test_actions (id INTEGER PRIMARY KEY AUTOINCREMENT, run_id TEXT NOT NULL, origin TEXT NOT NULL, resource TEXT NOT NULL, method TEXT NOT NULL, url_sha256 TEXT NOT NULL, cleanup_method TEXT NOT NULL, cleanup_url_sha256 TEXT NOT NULL, status TEXT NOT NULL, planned_event_id INTEGER NOT NULL REFERENCES events(id), write_event_id INTEGER REFERENCES events(id), cleanup_event_id INTEGER REFERENCES events(id), observation_event_id INTEGER REFERENCES evidence(event_id), state_event_id INTEGER NOT NULL DEFAULT 0)",
 		"CREATE INDEX IF NOT EXISTS idx_test_actions_run ON test_actions(run_id,id)",
+		"CREATE TABLE IF NOT EXISTS test_action_reviews (id INTEGER PRIMARY KEY AUTOINCREMENT, run_id TEXT NOT NULL, action_id INTEGER NOT NULL REFERENCES test_actions(id), state_event_id INTEGER NOT NULL REFERENCES events(id), review_event_id INTEGER NOT NULL REFERENCES events(id), status TEXT NOT NULL)",
+		"CREATE INDEX IF NOT EXISTS idx_test_action_reviews_action ON test_action_reviews(action_id,id)",
 	} {
 		if _, err := db.Exec(q); err != nil {
 			db.Close()
 			return nil, err
 		}
+	}
+	if err := migrateTestActionState(db); err != nil {
+		db.Close()
+		return nil, err
 	}
 	return &Store{db: db}, nil
 }
@@ -224,8 +232,10 @@ func (s *Store) PurgeRun(ctx context.Context, runID string) error {
 	for _, query := range []string{
 		"DELETE FROM memories WHERE source_event_id IN (SELECT id FROM events WHERE run_id=?)",
 		"DELETE FROM findings WHERE run_id=?",
+		"DELETE FROM test_action_reviews WHERE run_id=?",
 		"DELETE FROM test_actions WHERE run_id=?",
 		"DELETE FROM evidence WHERE run_id=?",
+		"DELETE FROM run_snapshots WHERE run_id=?",
 		"DELETE FROM events WHERE run_id=?",
 	} {
 		if _, err := tx.ExecContext(ctx, query, runID); err != nil {

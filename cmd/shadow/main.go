@@ -8,6 +8,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"strconv"
 	"strings"
 	"time"
 
@@ -60,7 +61,7 @@ func run(args []string) error {
 	case "data":
 		return dataCommand(args[1:])
 	case "help", "--help", "-h":
-		fmt.Println("Shadow CLI\n\n  shadow                             Open TUI\n  shadow doctor                      Check local runtime\n  shadow sandbox run CMD             Run a command in network-disabled Docker\n  shadow tools audit                 Verify tool inventory\n  shadow data runs                   List stored runs\n  shadow data test-actions ID        List test-write cleanup obligations\n  shadow data purge-run ID --confirm ID  Delete one run from the active database")
+		fmt.Println("Shadow CLI\n\n  shadow                             Open TUI\n  shadow doctor                      Check local runtime\n  shadow sandbox run CMD             Run a command in network-disabled Docker\n  shadow tools audit                 Verify tool inventory\n  shadow data runs                   List stored runs\n  shadow data scope ID               Show the immutable run scope/action snapshot\n  shadow data test-actions ID        List test-write cleanup obligations\n  shadow data review-test-action RUN ACTION --state EVENT  Acknowledge one observed journal state\n  shadow data purge-run ID --confirm ID  Delete one run from the active database")
 		return nil
 	default:
 		return fmt.Errorf("unknown command %q; use shadow help", args[0])
@@ -101,9 +102,39 @@ func dataCommandAt(path string, args []string) error {
 			return err
 		}
 		for _, action := range actions {
-			fmt.Printf("%d  %s  %s  %s  plan-event=%d write-event=%d cleanup-event=%d observation-event=%d\n",
-				action.ID, action.Status, action.Origin, action.Resource, action.PlannedEventID, action.WriteEventID, action.CleanupEventID, action.ObservationEventID)
+			review := "required"
+			if action.Status == store.TestActionPlanned {
+				review = "not-needed"
+			} else if action.ReviewedStateID == action.StateEventID && action.ReviewEventID != 0 {
+				review = "acknowledged"
+			}
+			fmt.Printf("%d  %s  %s  %s  method=%s url-sha256=%s cleanup=%s cleanup-url-sha256=%s state-event=%d review=%s review-event=%d plan-event=%d write-event=%d cleanup-event=%d observation-event=%d\n",
+				action.ID, action.Status, action.Origin, action.Resource, action.Method, action.URLSHA256, action.CleanupMethod, action.CleanupURLSHA256, action.StateEventID, review, action.ReviewEventID, action.PlannedEventID, action.WriteEventID, action.CleanupEventID, action.ObservationEventID)
 		}
+		fmt.Println("Review acknowledges the current journal state only; cleanup and resource removal remain unverified.")
+		return nil
+	}
+	if len(args) == 2 && args[0] == "scope" && args[1] != "" {
+		snap, err := st.RunSnapshot(ctx, args[1])
+		if err != nil {
+			return err
+		}
+		fmt.Printf("Run %s  origin=%s  actions=%d  created=%s\n", snap.RunID, snap.Origin, len(snap.Actions), snap.CreatedAt.Format(time.RFC3339))
+		for _, action := range snap.Actions {
+			fmt.Printf("%s  %s  url-sha256=%s  resource=%s  cleanup=%s  cleanup-url-sha256=%s\n", action.Effect, action.Method, action.URLSHA256, action.Resource, action.CleanupMethod, action.CleanupURLSHA256)
+		}
+		return nil
+	}
+	if len(args) == 5 && args[0] == "review-test-action" && args[1] != "" && args[3] == "--state" {
+		actionID, idErr := strconv.ParseInt(args[2], 10, 64)
+		stateID, stateErr := strconv.ParseInt(args[4], 10, 64)
+		if idErr != nil || stateErr != nil || actionID <= 0 || stateID <= 0 {
+			return errors.New("positive action and state event IDs required")
+		}
+		if err := st.ReviewTestAction(ctx, args[1], actionID, stateID); err != nil {
+			return err
+		}
+		fmt.Printf("Reviewed action %d in run %s at state event %d. Cleanup remains unresolved.\n", actionID, args[1], stateID)
 		return nil
 	}
 	if len(args) == 4 && args[0] == "purge-run" && args[2] == "--confirm" && args[1] != "" && args[1] == args[3] {
@@ -113,7 +144,7 @@ func dataCommandAt(path string, args []string) error {
 		fmt.Printf("Run %s removed from the active database.\n", args[1])
 		return nil
 	}
-	return errors.New("usage: shadow data runs | shadow data test-actions ID | shadow data purge-run ID --confirm ID")
+	return errors.New("usage: shadow data runs | shadow data scope ID | shadow data test-actions ID | shadow data review-test-action RUN ACTION --state EVENT | shadow data purge-run ID --confirm ID")
 }
 
 func doctor() error {

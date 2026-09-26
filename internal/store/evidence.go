@@ -15,6 +15,8 @@ import (
 	"net/http"
 	"net/url"
 	"time"
+
+	"shadow/internal/policy"
 )
 
 const maxEvidenceBytes = 512 << 10
@@ -132,6 +134,17 @@ func validateEvidence(summary EvidenceSummary, raw []byte) error {
 // RecordObservation commits the minimized event and encrypted raw response in
 // one transaction. A failed evidence write cannot leave an observation behind.
 func (s *Store) RecordObservation(ctx context.Context, runID string, summary EvidenceSummary, raw []byte) (int64, error) {
+	return s.recordObservation(ctx, runID, summary, raw, nil)
+}
+
+// RecordObservationForSnapshot also checks the run identity and final read
+// grant inside the evidence transaction. A purged or reused run cannot receive
+// evidence from an in-flight fixture response.
+func (s *Store) RecordObservationForSnapshot(ctx context.Context, snapshot RunSnapshot, summary EvidenceSummary, raw []byte) (int64, error) {
+	return s.recordObservation(ctx, snapshot.RunID, summary, raw, &snapshot)
+}
+
+func (s *Store) recordObservation(ctx context.Context, runID string, summary EvidenceSummary, raw []byte, snapshot *RunSnapshot) (int64, error) {
 	if runID == "" || summary.Origin == "" || !validDigest(summary.URLSHA256) || !validDigest(summary.SHA256) || summary.Status < 100 || summary.Status > 599 || summary.Bytes < 0 || len(raw) == 0 || len(raw) > maxEvidenceBytes {
 		return 0, errors.New("invalid observation or raw evidence")
 	}
@@ -151,6 +164,29 @@ func (s *Store) RecordObservation(ctx context.Context, runID string, summary Evi
 		return 0, err
 	}
 	defer tx.Rollback()
+	if snapshot != nil {
+		granted := false
+		for _, action := range snapshot.Actions {
+			if action == (ActionGrant{Method: http.MethodGet, URLSHA256: summary.URLSHA256, Effect: policy.EffectRead}) {
+				granted = true
+				break
+			}
+		}
+		if !granted || summary.Origin != snapshot.Origin {
+			return 0, errors.New("fixture response is outside the run read grants")
+		}
+		actions, err := json.Marshal(snapshot.Actions)
+		if err != nil {
+			return 0, err
+		}
+		var exists bool
+		if err := tx.QueryRowContext(ctx, "SELECT EXISTS(SELECT 1 FROM run_snapshots WHERE run_id=? AND origin=? AND actions=? AND created_at=?)", runID, snapshot.Origin, actions, snapshot.CreatedAt.Format(time.RFC3339Nano)).Scan(&exists); err != nil {
+			return 0, err
+		}
+		if !exists {
+			return 0, errors.New("fixture run snapshot is unavailable or changed")
+		}
+	}
 	at := time.Now().UTC().Format(time.RFC3339Nano)
 	result, err := tx.ExecContext(ctx, "INSERT INTO events(run_id,at,kind,payload) VALUES(?,?,?,?)", runID, at, "observation", payload)
 	if err != nil {
@@ -217,4 +253,22 @@ func (s *Store) observationInRun(ctx context.Context, runID string, eventID int6
 		return EvidenceSummary{}, err
 	}
 	return summary, nil
+}
+
+// ValidatedObservation returns only evidence whose encrypted response and
+// minimized event still agree. Callers must keep the raw response out of logs.
+func (s *Store) ValidatedObservation(ctx context.Context, runID string, eventID int64) (EvidenceSummary, RawHTTP, error) {
+	summary, err := s.observationInRun(ctx, runID, eventID)
+	if err != nil {
+		return EvidenceSummary{}, RawHTTP{}, err
+	}
+	raw, err := s.RawEvidence(ctx, runID, eventID)
+	if err != nil {
+		return EvidenceSummary{}, RawHTTP{}, err
+	}
+	var response RawHTTP
+	if err := json.Unmarshal(raw, &response); err != nil {
+		return EvidenceSummary{}, RawHTTP{}, err
+	}
+	return summary, response, nil
 }

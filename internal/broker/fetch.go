@@ -61,6 +61,8 @@ type Fetcher struct {
 	last         time.Time
 	interval     time.Duration
 	requestLimit int
+	guard        func(context.Context, string) error
+	cleanupOnly  bool
 }
 
 // Observation excludes body bytes, headers, path, and query. Hashes identify
@@ -188,6 +190,26 @@ func (f *Fetcher) GetRecorded(ctx context.Context, runID, raw string, st *store.
 }
 
 func (f *Fetcher) get(ctx context.Context, raw string) (Observation, []byte, error) {
+	if f.cleanupOnly {
+		return Observation{}, nil, errors.New("cleanup fetcher cannot read")
+	}
+	return f.request(ctx, http.MethodGet, raw)
+}
+
+// delete is used only by the run-bound loopback cleanup executor. A DELETE
+// redirect is never followed because its effect at the next URL is unknown.
+func (f *Fetcher) delete(ctx context.Context, raw string) (Observation, error) {
+	if !f.cleanupOnly {
+		return Observation{}, errors.New("read fetcher cannot delete")
+	}
+	observation, _, err := f.request(ctx, http.MethodDelete, raw)
+	return observation, err
+}
+
+func (f *Fetcher) request(ctx context.Context, method, raw string) (Observation, []byte, error) {
+	if method != http.MethodGet && method != http.MethodDelete {
+		return Observation{}, nil, errors.New("unsupported fixture request method")
+	}
 	current, err := checkedURL(f.scope, raw)
 	if err != nil {
 		return Observation{}, nil, err
@@ -215,13 +237,18 @@ func (f *Fetcher) get(ctx context.Context, raw string) (Observation, []byte, err
 	defer transport.CloseIdleConnections()
 	client := &http.Client{Timeout: 20 * time.Second, Transport: transport, CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}
 	for redirects := 0; ; redirects++ {
+		if f.guard != nil {
+			if err := f.guard(ctx, current.String()); err != nil {
+				return Observation{}, nil, err
+			}
+		}
 		if _, ok := f.allowed[current.String()]; !ok {
 			return Observation{}, nil, errors.New("URL is not explicitly allowed")
 		}
 		if err := f.reserve(ctx); err != nil {
 			return Observation{}, nil, err
 		}
-		req, err := http.NewRequestWithContext(ctx, http.MethodGet, current.String(), nil)
+		req, err := http.NewRequestWithContext(ctx, method, current.String(), nil)
 		if err != nil {
 			return Observation{}, nil, errors.New("invalid request URL")
 		}
@@ -233,6 +260,9 @@ func (f *Fetcher) get(ctx context.Context, raw string) (Observation, []byte, err
 		if isRedirect(resp.StatusCode) {
 			location := resp.Header.Get("Location")
 			resp.Body.Close()
+			if method != http.MethodGet {
+				return Observation{}, nil, errors.New("fixture cleanup redirect denied")
+			}
 			if redirects >= maxRedirects || location == "" {
 				return Observation{}, nil, errors.New("redirect limit reached or location missing")
 			}
@@ -262,7 +292,7 @@ func (f *Fetcher) get(ctx context.Context, raw string) (Observation, []byte, err
 			contentType = ""
 		}
 		observation := Observation{Origin: f.scope.Origin, URLSHA256: hex.EncodeToString(urlHash[:]), Status: resp.StatusCode, ContentType: contentType, Bytes: len(body), SHA256: hex.EncodeToString(bodyHash[:]), Truncated: truncated}
-		evidence, err := json.Marshal(store.RawHTTP{RequestURL: current.String(), Method: http.MethodGet, Status: resp.StatusCode, Header: resp.Header.Clone(), Body: body, Truncated: truncated})
+		evidence, err := json.Marshal(store.RawHTTP{RequestURL: current.String(), Method: method, Status: resp.StatusCode, Header: resp.Header.Clone(), Body: body, Truncated: truncated})
 		if err != nil {
 			return Observation{}, nil, errors.New("raw response encoding failed")
 		}

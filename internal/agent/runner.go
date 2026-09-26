@@ -76,8 +76,11 @@ func (r *Runner) Run(ctx context.Context, prompt, target string) (string, error)
 		return "", err
 	}
 	runID := hex.EncodeToString(idBytes[:])
-	if r.emit(ctx, runID, "started", "Target scope: "+scope.Origin) == 0 {
-		return runID, errors.New("could not persist run start")
+	if err := r.Store.StartRun(ctx, runID, scope, nil); err != nil {
+		return runID, fmt.Errorf("could not persist run start: %w", err)
+	}
+	if r.Notify != nil {
+		r.Notify(Event{Kind: "started", Text: "Target scope: " + scope.Origin})
 	}
 	// Live target HTTP is gated until redaction and side-effect policy are complete.
 	llm := provider.Client{BaseURL: r.Route.BaseURL, Key: r.Key}

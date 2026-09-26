@@ -38,10 +38,11 @@ func TestTestWriteJournalFailClosedAndPurge(t *testing.T) {
 	if _, err := st.PlanTestWrite(ctx, "run-1", decision); err == nil {
 		t.Fatal("accepted write plan for missing run")
 	}
-	if err := st.Append(ctx, "run-1", "started", map[string]string{"scope": "http://fixture.test"}); err != nil {
+	scope, _ := policy.FromTarget("http://fixture.test")
+	if err := st.StartRun(ctx, "run-1", scope, []policy.ActionRule{decision.Rule}); err != nil {
 		t.Fatal(err)
 	}
-	if err := st.Append(ctx, "run-2", "started", map[string]string{"scope": "http://fixture.test"}); err != nil {
+	if err := st.StartRun(ctx, "run-2", scope, nil); err != nil {
 		t.Fatal(err)
 	}
 	denied := decision
@@ -153,10 +154,11 @@ func TestInterruptedCleanupObligationsSurviveRestart(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := st.Append(ctx, "run-1", "started", map[string]string{"scope": "http://fixture.test"}); err != nil {
+	decision := testWriteDecision(t)
+	scope, _ := policy.FromTarget("http://fixture.test")
+	if err := st.StartRun(ctx, "run-1", scope, []policy.ActionRule{decision.Rule}); err != nil {
 		t.Fatal(err)
 	}
-	decision := testWriteDecision(t)
 	beforeDispatch, err := st.PlanTestWrite(ctx, "run-1", decision)
 	if err != nil {
 		t.Fatal(err)
