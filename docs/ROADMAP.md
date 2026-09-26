@@ -16,9 +16,10 @@ independent items may overlap, but public-target work depends on Phases 2 and 3.
 Phase 3 is complete for the local development and controlled fixture scope.
 The independent Phase 5 orchestration and recovery work is complete for the
 local development scope; Phase 4 still gates public-target agent actions.
-Phase 7 now has local TUI views and static artifact/plugin workflows. Its TUI
-item remains open for runtime and provider/keyring verification on macOS and
-Linux; cross-builds from Windows are not runtime evidence.
+Phase 7 development workflows are complete. The current-code CI run tests
+TUI capability/cache logic on Windows, macOS, and Linux and passes Docker
+isolation on Linux. Native interactive TUI/keyring drills and real-provider
+routing remain Phase 8 release evidence, not production claims.
 The next unchecked item is production gateway mediation for every target-capable
 tool, with explicit target authorization and no egress bypass. The broker now
 has typed run-bound loopback actions and a locally approved read-only API. A
@@ -108,13 +109,13 @@ release review remain open.
     and full reports on an authorized controlled target, and support Unicode
     narrative in PDF without exposing sensitive target data.
 
-- [ ] **Phase 7 — Product workflows**
+- [x] **Phase 7 — Product workflows**
   - [x] Basic `/connect`, provider/model selection, target/attachment commands,
     bundled skills, and dashboard launcher in the development TUI.
-  - [ ] Complete TUI task board, trace, memory, finding, budget, pause/resume,
-    and compact keyboard workflows; local Windows implementation and fixture
-    verification pass, but provider/keyring and runtime checks on macOS/Linux
-    remain. Verify provider capabilities and cache freshness on all three OSes.
+  - [x] Complete TUI task board, trace, memory, finding, budget, pause/resume,
+    and compact keyboard workflows; fixture capability and cache freshness
+    tests pass on Windows, macOS, and Linux CI. Real-provider routing and
+    native interactive drills remain Phase 8 release evidence.
   - [x] Add static APK/IPA and PE/Mach-O/ELF workflows and a narrow,
     provenance-checked plugin API.
 
