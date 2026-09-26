@@ -26,7 +26,29 @@ func testWriteDecision(t *testing.T) policy.ActionDecision {
 	return p.Classify(rule.Method, rule.URL)
 }
 
-func TestTestWriteJournalFailClosedAndPurge(t *testing.T) {
+func TestFixtureWriteReservationBlocksDuplicateMarkerAcrossRuns(t *testing.T) {
+	ctx := context.Background()
+	st, err := Open(filepath.Join(t.TempDir(), "shadow.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st.Close()
+	decision := testWriteDecision(t)
+	scope, _ := policy.FromTarget(decision.Rule.URL)
+	for _, runID := range []string{"run-1", "run-2"} {
+		if err := st.StartRun(ctx, runID, scope, []policy.ActionRule{decision.Rule}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if _, err := st.PlanFixtureTestWrite(ctx, "run-1", decision); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := st.PlanFixtureTestWrite(ctx, "run-2", decision); err == nil {
+		t.Fatal("reserved marker was planned in another run")
+	}
+}
+
+func TestTestWriteJournalFailClosedAndPreservesUnresolvedCleanup(t *testing.T) {
 	ctx := context.Background()
 	path := filepath.Join(t.TempDir(), "shadow.db")
 	st, err := OpenWithEvidenceKey(path, bytes.Repeat([]byte{7}, 32))
@@ -135,12 +157,12 @@ func TestTestWriteJournalFailClosedAndPurge(t *testing.T) {
 			t.Fatalf("journal leaked route in event %d", event.ID)
 		}
 	}
-	if err := st.PurgeRun(ctx, "run-1"); err != nil {
-		t.Fatal(err)
+	if err := st.PurgeRun(ctx, "run-1"); err == nil {
+		t.Fatal("purged a run with unresolved cleanup")
 	}
 	actions, err = st.TestActions(ctx, "run-1")
-	if err != nil || len(actions) != 0 {
-		t.Fatalf("journal survived purge: %#v %v", actions, err)
+	if err != nil || len(actions) != 1 || actions[0].Status != TestActionCleanupObserved {
+		t.Fatalf("unresolved cleanup journal was lost: %#v %v", actions, err)
 	}
 	if other, err := st.Events(ctx, "run-2"); err != nil || len(other) == 0 {
 		t.Fatalf("other run removed: %#v %v", other, err)

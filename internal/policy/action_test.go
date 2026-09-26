@@ -56,6 +56,8 @@ func TestActionPolicyRejectsUnsafeDeclarations(t *testing.T) {
 		{URL: "https://other.test/markers", Method: "POST", Effect: EffectAuth},
 		{URL: scope.Origin + "/markers#part", Method: "POST", Effect: EffectAuth},
 		{URL: scope.Origin + "/markers", Method: "post", Effect: EffectAuth},
+		{URL: scope.Origin + "/login?token=secret", Method: "POST", Effect: EffectAuth},
+		{URL: "https://user:secret@example.test/login", Method: "POST", Effect: EffectAuth},
 	}
 	for _, rule := range invalid {
 		if _, err := NewActionPolicy(scope, []ActionRule{rule}); err == nil {

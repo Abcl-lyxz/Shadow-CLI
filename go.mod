@@ -6,6 +6,7 @@ require (
 	charm.land/bubbletea/v2 v2.0.9
 	github.com/moby/moby/api v1.56.0
 	github.com/moby/moby/client v0.6.0
+	github.com/pandatix/go-cvss v0.6.4
 	github.com/zalando/go-keyring v0.2.8
 	modernc.org/sqlite v1.59.0
 )

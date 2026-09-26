@@ -3,12 +3,113 @@ package store
 import (
 	"context"
 	"database/sql"
+	"encoding/json"
 	"path/filepath"
 	"strings"
 	"testing"
 
 	"shadow/internal/policy"
 )
+
+func TestFixtureMutationDecisionRequiresCurrentGrantAndJournalState(t *testing.T) {
+	ctx := context.Background()
+	st, err := Open(filepath.Join(t.TempDir(), "shadow.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st.Close()
+	decision := testWriteDecision(t)
+	scope, _ := policy.FromTarget(decision.Rule.URL)
+	if err := st.StartRun(ctx, "run", scope, []policy.ActionRule{decision.Rule}); err != nil {
+		t.Fatal(err)
+	}
+	snapshot, err := st.RunSnapshot(ctx, "run")
+	if err != nil {
+		t.Fatal(err)
+	}
+	id, err := st.PlanFixtureTestWrite(ctx, "run", decision)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := st.RecordFixtureMutationDecision(ctx, snapshot, "POST", decision.Rule.URL, id); err == nil {
+		t.Fatal("planned action gained dispatch authorization")
+	}
+	if err := st.MarkTestWritePossible(ctx, "run", id); err != nil {
+		t.Fatal(err)
+	}
+	for _, request := range []struct {
+		method, url string
+		id          int64
+	}{
+		{"POST", decision.Rule.URL + "&extra=1", id},
+		{"POST", decision.Rule.URL, id + 1},
+		{"DELETE", decision.Rule.CleanupURL, id},
+	} {
+		if err := st.RecordFixtureMutationDecision(ctx, snapshot, request.method, request.url, request.id); err == nil {
+			t.Fatalf("unauthorized mutation decision: %+v", request)
+		}
+	}
+	if err := st.RecordFixtureMutationDecision(ctx, snapshot, "POST", decision.Rule.URL, id); err != nil {
+		t.Fatal(err)
+	}
+	if err := st.MarkCleanupAttempted(ctx, "run", id); err != nil {
+		t.Fatal(err)
+	}
+	if err := st.RecordFixtureMutationDecision(ctx, snapshot, "POST", decision.Rule.URL, id); err == nil {
+		t.Fatal("POST remained authorized after cleanup began")
+	}
+	if err := st.RecordFixtureMutationDecision(ctx, snapshot, "DELETE", decision.Rule.CleanupURL, id); err != nil {
+		t.Fatal(err)
+	}
+	genericID, err := st.PlanTestWrite(ctx, "run", decision)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := st.MarkTestWritePossible(ctx, "run", genericID); err != nil {
+		t.Fatal(err)
+	}
+	if err := st.RecordFixtureMutationDecision(ctx, snapshot, "POST", decision.Rule.URL, genericID); err == nil {
+		t.Fatal("untyped generic plan gained fixture POST authorization")
+	}
+	if err := st.MarkCleanupAttempted(ctx, "run", genericID); err != nil {
+		t.Fatal(err)
+	}
+	if err := st.RecordFixtureMutationDecision(ctx, snapshot, "DELETE", decision.Rule.CleanupURL, genericID); err == nil {
+		t.Fatal("untyped generic plan gained fixture DELETE authorization")
+	}
+	events, err := st.Events(ctx, "run")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var seen []string
+	for _, event := range events {
+		if event.Kind != "network_decision" {
+			continue
+		}
+		var payload struct {
+			Method       string `json:"method"`
+			URLSHA256    string `json:"url_sha256"`
+			Allowed      bool   `json:"allowed"`
+			TestActionID int64  `json:"test_action_id"`
+		}
+		if err := json.Unmarshal(event.Payload, &payload); err != nil || !payload.Allowed || payload.TestActionID != id {
+			t.Fatalf("invalid decision event: %s %v", event.Payload, err)
+		}
+		if strings.Contains(string(event.Payload), "private") || strings.Contains(string(event.Payload), "/markers") {
+			t.Fatalf("mutation URL leaked into decision: %s", event.Payload)
+		}
+		seen = append(seen, payload.Method)
+	}
+	if len(seen) != 2 || seen[0] != "POST" || seen[1] != "DELETE" {
+		t.Fatalf("mutation decision order: %v", seen)
+	}
+	if err := st.PurgeRun(ctx, "run"); err == nil {
+		t.Fatal("unresolved cleanup obligation was purged")
+	}
+	if err := st.RecordFixtureMutationDecision(ctx, RunSnapshot{RunID: "other", Origin: snapshot.Origin, Actions: snapshot.Actions, CreatedAt: snapshot.CreatedAt}, "DELETE", decision.Rule.CleanupURL, id); err == nil {
+		t.Fatal("different run inherited the mutation decision")
+	}
+}
 
 func TestRunSnapshotLimitsWritesAndIsImmutable(t *testing.T) {
 	ctx := context.Background()
@@ -159,7 +260,7 @@ func TestLegacyTestActionJournalGetsReviewStateColumn(t *testing.T) {
 	}
 	defer st.Close()
 	actions, err := st.TestActions(context.Background(), "legacy")
-	if err != nil || len(actions) != 1 || actions[0].StateEventID <= actions[0].PlannedEventID {
+	if err != nil || len(actions) != 1 || actions[0].StateEventID <= actions[0].PlannedEventID || actions[0].CleanupProtocol != legacyCleanupProtocol {
 		t.Fatalf("legacy migration: %#v %v", actions, err)
 	}
 	state, err := st.EventInRun(context.Background(), "legacy", actions[0].StateEventID)

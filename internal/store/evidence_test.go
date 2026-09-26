@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"path/filepath"
 	"testing"
+	"time"
 )
 
 func responseFixture(t *testing.T, body string) (EvidenceSummary, []byte) {
@@ -157,8 +158,25 @@ func TestFindingRequiresSourceAndSafeLaterReproduction(t *testing.T) {
 	if err := st.VerifyResponseFinding(ctx, "run-1", responseID, repeat); err != nil {
 		t.Fatal(err)
 	}
+	verified, err := st.RecallVerifiedResponses(ctx, summary.Origin, 6)
+	if err != nil || len(verified) != 1 || verified[0].SourceEventID != source || verified[0].RepeatEventID != repeat || verified[0].BodySHA256 != summary.SHA256 || verified[0].Confidence != "reproduced_response" || !verified[0].ExpiresAt.After(time.Now()) {
+		t.Fatalf("shared verified response memory: %#v %v", verified, err)
+	}
+	otherScope, err := st.RecallVerifiedResponses(ctx, "https://other.example", 6)
+	if err != nil || len(otherScope) != 0 {
+		t.Fatalf("cross-scope verified memory: %#v %v", otherScope, err)
+	}
 	findings, err := st.Findings(ctx, "run-1")
 	if err != nil || len(findings) != 2 || findings[0].Status != "hypothesis" || findings[1].Status != "verified" || findings[1].ReproductionEventID != repeat {
 		t.Fatalf("finding states: %v %#v", err, findings)
+	}
+	if expired, err := st.recallVerifiedResponses(ctx, summary.Origin, 6, time.Now().Add(31*24*time.Hour)); err != nil || len(expired) != 0 {
+		t.Fatalf("expired memory recalled: %#v %v", expired, err)
+	}
+	if _, err := st.db.ExecContext(ctx, "UPDATE verified_response_memory SET expires_at=? WHERE finding_id=?", time.Now().Add(365*24*time.Hour).UTC().Format(time.RFC3339Nano), responseID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := st.RecallVerifiedResponses(ctx, summary.Origin, 6); err == nil {
+		t.Fatal("edited memory expiry passed event seal")
 	}
 }

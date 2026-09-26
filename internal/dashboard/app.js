@@ -43,6 +43,10 @@ async function selectRun(id) {
       const label = finding.status === "verified" && finding.claim_type === "response_observation" ? "Response reproduced" : "Hypothesis";
       top.append(element("span", "event-kind", label), element("span", "", finding.asset));
       card.append(top, element("h3", "finding-title", finding.title), element("div", "finding-meta", "Source event #" + finding.source_event_id + (finding.reproduction_event_id ? " · Repeat event #" + finding.reproduction_event_id : "")));
+      if (finding.review) {
+        const review = finding.review;
+        card.append(element("div", "finding-meta", "PoC: " + review.poc_status + " · Confidence: " + review.confidence + (review.duplicate_of ? " · Duplicate of #" + review.duplicate_of : "") + (review.cvss_vector ? " · Provisional CVSS v4: " + review.cvss_score + " (" + review.cvss_vector + ")" : "")));
+      }
       findingsNode.append(card);
     }
   } catch (error) {

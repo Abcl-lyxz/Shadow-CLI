@@ -17,7 +17,7 @@ import (
 	"shadow/internal/store"
 )
 
-func setupFixtureCleanup(t *testing.T, handler http.Handler) (*store.Store, *FixtureCleanupExecutor, *FixtureDispatcher, policy.ActionRule, policy.ActionRule, func()) {
+func setupFixtureCleanup(t *testing.T, handler http.Handler) (*store.Store, *fixtureCleanupExecutor, *fixtureDispatcher, policy.ActionRule, policy.ActionRule, func()) {
 	t.Helper()
 	server := httptest.NewServer(handler)
 	st, err := store.OpenWithEvidenceKey(filepath.Join(t.TempDir(), "shadow.db"), bytes.Repeat([]byte{9}, 32))
@@ -35,7 +35,7 @@ func setupFixtureCleanup(t *testing.T, handler http.Handler) (*store.Store, *Fix
 		t.Fatal(err)
 	}
 	opts := Options{AllowLoopback: true, interval: time.Millisecond}
-	executor, err := NewFixtureCleanupExecutor(ctx, st, "run", write, read, opts)
+	executor, err := newFixtureCleanupExecutor(ctx, st, "run", write, read, opts)
 	if err != nil {
 		st.Close()
 		server.Close()
@@ -71,7 +71,7 @@ func TestFixtureCleanupExecutesAndVerifiesNamedMarker(t *testing.T) {
 	defer closeAll()
 	ctx := context.Background()
 	policySet, _ := policy.NewActionPolicy(mustScope(t, write.URL), []policy.ActionRule{write})
-	actionID, err := st.PlanTestWrite(ctx, "run", policySet.Classify(write.Method, write.URL))
+	actionID, err := st.PlanFixtureTestWrite(ctx, "run", policySet.Classify(write.Method, write.URL))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -84,7 +84,7 @@ func TestFixtureCleanupExecutesAndVerifiesNamedMarker(t *testing.T) {
 	if _, _, err := executor.cleanup.get(ctx, read.URL); err == nil {
 		t.Fatal("cleanup fetcher accepted GET")
 	}
-	_, beforeID, err := reader.GetRecorded(ctx, http.MethodGet, read.URL)
+	_, beforeID, err := reader.getRecorded(ctx, http.MethodGet, read.URL)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -138,11 +138,11 @@ func TestFixtureCleanupRejectsChangedOrUngrantedRules(t *testing.T) {
 		{write, policy.ActionRule{URL: read.URL + "?other=1", Method: http.MethodGet, Effect: policy.EffectRead}, Options{AllowLoopback: true}},
 		{write, read, Options{}},
 	} {
-		if _, err := NewFixtureCleanupExecutor(ctx, st, "run", tc.write, tc.read, tc.opts); err == nil {
+		if _, err := newFixtureCleanupExecutor(ctx, st, "run", tc.write, tc.read, tc.opts); err == nil {
 			t.Fatal("accepted changed or ungranted fixture cleanup rule")
 		}
 	}
-	if _, err := NewFixtureCleanupExecutor(ctx, st, "other-run", write, read, Options{AllowLoopback: true}); err == nil {
+	if _, err := newFixtureCleanupExecutor(ctx, st, "other-run", write, read, Options{AllowLoopback: true}); err == nil {
 		t.Fatal("accepted cleanup for a different run")
 	}
 	if hits.Load() != 0 {
@@ -166,11 +166,11 @@ func TestFixtureCleanupRejectsUnprovenAndRedirectedDeletes(t *testing.T) {
 	defer closeAll()
 	ctx := context.Background()
 	policySet, _ := policy.NewActionPolicy(mustScope(t, write.URL), []policy.ActionRule{write})
-	_, earlyID, err := reader.GetRecorded(ctx, http.MethodGet, read.URL)
+	_, earlyID, err := reader.getRecorded(ctx, http.MethodGet, read.URL)
 	if err != nil {
 		t.Fatal(err)
 	}
-	actionID, err := st.PlanTestWrite(ctx, "run", policySet.Classify(write.Method, write.URL))
+	actionID, err := st.PlanFixtureTestWrite(ctx, "run", policySet.Classify(write.Method, write.URL))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -180,7 +180,7 @@ func TestFixtureCleanupRejectsUnprovenAndRedirectedDeletes(t *testing.T) {
 	if _, err := executor.Cleanup(ctx, actionID, earlyID); err == nil || deletes.Load() != 0 {
 		t.Fatalf("early evidence authorized DELETE: %v", err)
 	}
-	_, beforeID, err := reader.GetRecorded(ctx, http.MethodGet, read.URL)
+	_, beforeID, err := reader.getRecorded(ctx, http.MethodGet, read.URL)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -207,14 +207,14 @@ func TestFixtureCleanupNeedsSemanticAbsence(t *testing.T) {
 	defer closeAll()
 	ctx := context.Background()
 	policySet, _ := policy.NewActionPolicy(mustScope(t, write.URL), []policy.ActionRule{write})
-	actionID, err := st.PlanTestWrite(ctx, "run", policySet.Classify(write.Method, write.URL))
+	actionID, err := st.PlanFixtureTestWrite(ctx, "run", policySet.Classify(write.Method, write.URL))
 	if err != nil {
 		t.Fatal(err)
 	}
 	if err := st.MarkTestWritePossible(ctx, "run", actionID); err != nil {
 		t.Fatal(err)
 	}
-	_, beforeID, err := reader.GetRecorded(ctx, http.MethodGet, read.URL)
+	_, beforeID, err := reader.getRecorded(ctx, http.MethodGet, read.URL)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -224,6 +224,40 @@ func TestFixtureCleanupNeedsSemanticAbsence(t *testing.T) {
 	actions, err := st.TestActions(ctx, "run")
 	if err != nil || len(actions) != 1 || actions[0].Status != store.TestActionCleanupObserved {
 		t.Fatalf("incorrect semantic cleanup state: %#v %v", actions, err)
+	}
+}
+
+func TestFixtureCleanupRejectsUntypedPlanBeforeDelete(t *testing.T) {
+	var deletes atomic.Int32
+	st, executor, reader, write, read, closeAll := setupFixtureCleanup(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodDelete {
+			deletes.Add(1)
+			w.WriteHeader(http.StatusNoContent)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		w.Write([]byte(`{"resource":"shadow_marker_1","present":true}`))
+	}))
+	defer closeAll()
+	ctx := context.Background()
+	policySet, _ := policy.NewActionPolicy(mustScope(t, write.URL), []policy.ActionRule{write})
+	actionID, err := st.PlanTestWrite(ctx, "run", policySet.Classify(write.Method, write.URL))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := st.MarkTestWritePossible(ctx, "run", actionID); err != nil {
+		t.Fatal(err)
+	}
+	_, presenceID, err := reader.getRecorded(ctx, http.MethodGet, read.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := executor.Cleanup(ctx, actionID, presenceID); err == nil || deletes.Load() != 0 {
+		t.Fatalf("untyped plan reached DELETE: %v deletes=%d", err, deletes.Load())
+	}
+	actions, err := st.TestActions(ctx, "run")
+	if err != nil || len(actions) != 1 || actions[0].Status != store.TestActionWritePossible {
+		t.Fatalf("untyped obligation changed: %#v %v", actions, err)
 	}
 }
 

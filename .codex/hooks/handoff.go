@@ -32,6 +32,15 @@ func main() {
 					}
 					s += "\n[Read docs/CURRENT_STATUS.md for verification and remaining gates.]"
 				}
+				if roadmap, err := os.ReadFile(filepath.Join(dir, "docs", "ROADMAP.md")); err == nil {
+					for _, line := range strings.Split(string(roadmap), "\n") {
+						if strings.HasPrefix(line, "**Active phase:") {
+							s += "\n\n" + strings.TrimSpace(line)
+							break
+						}
+					}
+					s += "\n[Read docs/ROADMAP.md for phase checkboxes.]"
+				}
 				fmt.Print(s)
 				return
 			}

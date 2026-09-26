@@ -6,6 +6,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"io"
 	"net/http"
 	"net/http/cookiejar"
 	"net/url"
@@ -25,6 +26,9 @@ func TestDashboardRequiresSessionAndServesEvents(t *testing.T) {
 	if err := st.Append(context.Background(), "0123456789abcdef", "started", map[string]string{"text": "fixture"}); err != nil {
 		t.Fatal(err)
 	}
+	if err := st.Append(context.Background(), "0123456789abcdef", "legacy_tool", map[string]string{"text": "customer-code-48217"}); err != nil {
+		t.Fatal(err)
+	}
 	urlText := "http://fixture.test/safe?token=private"
 	uHash := sha256.Sum256([]byte(urlText))
 	bHash := sha256.Sum256([]byte("private@example.com"))
@@ -34,7 +38,7 @@ func TestDashboardRequiresSessionAndServesEvents(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	findingID, err := st.CreateFinding(context.Background(), "0123456789abcdef", "Observed response", summary.Origin, store.ClaimResponseObservation, eventID)
+	findingID, err := st.CreateFinding(context.Background(), "0123456789abcdef", "customer-code-48217", summary.Origin, store.ClaimResponseObservation, eventID)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -43,6 +47,9 @@ func TestDashboardRequiresSessionAndServesEvents(t *testing.T) {
 		t.Fatal(err)
 	}
 	if err := st.VerifyResponseFinding(context.Background(), "0123456789abcdef", findingID, repeatID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := st.ReviewFinding(context.Background(), "0123456789abcdef", findingID, "response_reproduced", "high", 0, ""); err != nil {
 		t.Fatal(err)
 	}
 	srv, link, err := Start(st)
@@ -91,13 +98,17 @@ func TestDashboardRequiresSessionAndServesEvents(t *testing.T) {
 	if resp.StatusCode != http.StatusOK || !strings.Contains(resp.Header.Get("Content-Type"), "application/json") {
 		t.Fatalf("events status %d, type %s", resp.StatusCode, resp.Header.Get("Content-Type"))
 	}
+	eventBody, err := io.ReadAll(resp.Body)
+	if err != nil || strings.Contains(string(eventBody), "customer-code-48217") {
+		t.Fatalf("dashboard leaked legacy free-form event: %v %s", err, eventBody)
+	}
 	findingResponse, err := client.Get(u.Scheme + "://" + u.Host + "/api/v1/runs/0123456789abcdef/findings")
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer findingResponse.Body.Close()
 	var findings []store.Finding
-	if err := json.NewDecoder(findingResponse.Body).Decode(&findings); err != nil || findingResponse.StatusCode != http.StatusOK || len(findings) != 1 || findings[0].Status != "verified" || findings[0].ReproductionEventID != repeatID {
+	if err := json.NewDecoder(findingResponse.Body).Decode(&findings); err != nil || findingResponse.StatusCode != http.StatusOK || len(findings) != 1 || findings[0].Status != "verified" || findings[0].ReproductionEventID != repeatID || findings[0].Title != "[WITHHELD]" || findings[0].Asset != "[WITHHELD]" || findings[0].Review == nil || findings[0].Review.PoCStatus != "response_reproduced" {
 		t.Fatalf("finding API: status=%d findings=%#v error=%v", findingResponse.StatusCode, findings, err)
 	}
 }

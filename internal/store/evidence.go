@@ -64,6 +64,12 @@ func (s *Store) HasEvidence(ctx context.Context) (bool, error) {
 	return exists, err
 }
 
+// EvidenceKeyReady allows a network dispatcher to fail before sending a
+// request whose response could not be committed as encrypted evidence.
+func (s *Store) EvidenceKeyReady() bool {
+	return s != nil && len(s.evidenceKey) == 32
+}
+
 // ConfigureEvidenceKey checks the key against existing evidence before the
 // store accepts new records. A lost or replaced key must not orphan old data.
 func (s *Store) ConfigureEvidenceKey(ctx context.Context, key []byte) error {
@@ -107,6 +113,21 @@ func validDigest(s string) bool {
 	return err == nil && len(b) == sha256.Size
 }
 
+// SafeContentType is the only MIME metadata admitted to an unencrypted
+// observation. Arbitrary media-type tokens may themselves contain secrets.
+func SafeContentType(raw string) string {
+	contentType, _, err := mime.ParseMediaType(raw)
+	if err != nil {
+		return ""
+	}
+	switch contentType {
+	case "application/json", "text/plain", "text/html", "application/xml", "text/xml", "application/octet-stream":
+		return contentType
+	default:
+		return ""
+	}
+}
+
 func validateEvidence(summary EvidenceSummary, raw []byte) error {
 	var response RawHTTP
 	if err := json.Unmarshal(raw, &response); err != nil {
@@ -121,10 +142,7 @@ func validateEvidence(summary EvidenceSummary, raw []byte) error {
 	if hex.EncodeToString(urlHash[:]) != summary.URLSHA256 || hex.EncodeToString(bodyHash[:]) != summary.SHA256 {
 		return errors.New("raw response hash does not match observation")
 	}
-	contentType, _, err := mime.ParseMediaType(response.Header.Get("Content-Type"))
-	if err != nil || len(contentType) > 128 {
-		contentType = ""
-	}
+	contentType := SafeContentType(response.Header.Get("Content-Type"))
 	if contentType != summary.ContentType {
 		return errors.New("raw content type does not match observation")
 	}
@@ -159,6 +177,11 @@ func (s *Store) recordObservation(ctx context.Context, runID string, summary Evi
 	if err != nil {
 		return 0, err
 	}
+	unlock, err := s.beginProvenanceMutation(ctx)
+	if err != nil {
+		return 0, err
+	}
+	defer unlock()
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
 		return 0, err
@@ -205,7 +228,7 @@ func (s *Store) recordObservation(ctx context.Context, runID string, summary Evi
 	if _, err := tx.ExecContext(ctx, "INSERT INTO evidence(event_id,run_id,nonce,ciphertext,sha256,created_at) VALUES(?,?,?,?,?,?)", id, runID, nonce, ciphertext, hex.EncodeToString(digest[:]), at); err != nil {
 		return 0, err
 	}
-	if err := tx.Commit(); err != nil {
+	if err := s.commitWithProvenance(ctx, tx, "evidence"); err != nil {
 		return 0, err
 	}
 	return id, nil
@@ -223,6 +246,9 @@ func (s *Store) RawEvidence(ctx context.Context, runID string, eventID int64) ([
 	err = s.db.QueryRowContext(ctx, "SELECT nonce,ciphertext,sha256 FROM evidence WHERE event_id=? AND run_id=?", eventID, runID).Scan(&nonce, &ciphertext, &expected)
 	if err != nil {
 		return nil, err
+	}
+	if len(nonce) != aead.NonceSize() || len(ciphertext) < aead.Overhead() || len(ciphertext) > maxEvidenceBytes+aead.Overhead() {
+		return nil, errors.New("evidence authentication failed")
 	}
 	raw, err := aead.Open(nil, nonce, ciphertext, evidenceAAD(runID, eventID))
 	if err != nil {

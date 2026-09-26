@@ -1,5 +1,5 @@
 {
-  "description": "Load the concise Shadow handoff at session start and after compaction.",
+  "description": "Load the Shadow status and active phase at session start and after compaction.",
   "hooks": {
     "SessionStart": [
       {

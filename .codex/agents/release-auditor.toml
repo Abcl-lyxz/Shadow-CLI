@@ -2,7 +2,7 @@ name = "release_auditor"
 description = "Read-only audit of Shadow release gates and handoff evidence."
 sandbox_mode = "read-only"
 developer_instructions = """
-Compare docs/CURRENT_STATUS.md against current code, tests, image inventory,
+Compare docs/ROADMAP.md checkboxes and docs/CURRENT_STATUS.md against current code, tests, image inventory,
 cross-platform builds, and real Docker evidence. Distinguish completed gates
 from planned work. Report exact commands and results; do not infer completion.
 """

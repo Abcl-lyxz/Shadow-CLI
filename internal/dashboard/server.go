@@ -73,6 +73,11 @@ func Start(st *store.Store) (*Server, string, error) {
 			return
 		}
 		events, err := st.Events(r.Context(), id)
+		if err == nil {
+			for index := range events {
+				events[index].Payload = json.RawMessage(`{"withheld":true}`)
+			}
+		}
 		writeJSON(w, events, err)
 	})
 	mux.HandleFunc("GET /api/v1/runs/{id}/findings", func(w http.ResponseWriter, r *http.Request) {
@@ -82,6 +87,17 @@ func Start(st *store.Store) (*Server, string, error) {
 			return
 		}
 		findings, err := st.Findings(r.Context(), id)
+		if err == nil {
+			var reviews map[int64]store.FindingReview
+			reviews, err = st.FindingReviews(r.Context(), id)
+			for index := range findings {
+				findings[index].Title = "[WITHHELD]"
+				findings[index].Asset = "[WITHHELD]"
+				if review, ok := reviews[findings[index].ID]; ok {
+					findings[index].Review = &review
+				}
+			}
+		}
 		writeJSON(w, findings, err)
 	})
 	handler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

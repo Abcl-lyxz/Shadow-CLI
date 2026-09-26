@@ -44,6 +44,12 @@ type Client struct {
 	HTTP    *http.Client
 }
 
+type Usage struct {
+	InputTokens  int64
+	OutputTokens int64
+	Known        bool
+}
+
 func (c Client) endpoint(path string) (string, error) {
 	u, err := url.Parse(strings.TrimRight(c.BaseURL, "/"))
 	if err != nil || u == nil || u.Scheme != "https" || u.Host == "" || u.User != nil {
@@ -110,42 +116,62 @@ func (c Client) Models(ctx context.Context) ([]string, error) {
 }
 
 func (c Client) Chat(ctx context.Context, model string, messages []Message, tools []Tool) (Message, error) {
+	message, _, err := c.ChatWithUsage(ctx, model, messages, tools)
+	return message, err
+}
+
+func (c Client) ChatWithUsage(ctx context.Context, model string, messages []Message, tools []Tool) (Message, Usage, error) {
+	return c.ChatWithUsageLimit(ctx, model, messages, tools, 0)
+}
+
+func (c Client) ChatWithUsageLimit(ctx context.Context, model string, messages []Message, tools []Tool, maxOutputTokens int64) (Message, Usage, error) {
 	endpoint, err := c.endpoint("/chat/completions")
 	if err != nil {
-		return Message{}, err
+		return Message{}, Usage{}, err
 	}
 	request := map[string]any{"model": model, "messages": messages}
+	if maxOutputTokens > 0 {
+		request["max_tokens"] = maxOutputTokens
+	}
 	if len(tools) > 0 {
 		request["tools"] = tools
 	}
 	body, err := json.Marshal(request)
 	if err != nil {
-		return Message{}, err
+		return Message{}, Usage{}, err
 	}
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint, bytes.NewReader(body))
 	if err != nil {
-		return Message{}, err
+		return Message{}, Usage{}, err
 	}
 	req.Header.Set("Authorization", "Bearer "+c.Key)
 	req.Header.Set("Content-Type", "application/json")
 	resp, err := c.httpClient().Do(req)
 	if err != nil {
-		return Message{}, err
+		return Message{}, Usage{}, err
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
-		return Message{}, fmt.Errorf("model request failed: %s", resp.Status)
+		return Message{}, Usage{}, fmt.Errorf("model request failed: %s", resp.Status)
 	}
 	var data struct {
+		Usage *struct {
+			PromptTokens     int64 `json:"prompt_tokens"`
+			CompletionTokens int64 `json:"completion_tokens"`
+		} `json:"usage"`
 		Choices []struct {
 			Message Message `json:"message"`
 		} `json:"choices"`
 	}
 	if err := json.NewDecoder(io.LimitReader(resp.Body, 8<<20)).Decode(&data); err != nil {
-		return Message{}, err
+		return Message{}, Usage{}, err
 	}
 	if len(data.Choices) == 0 {
-		return Message{}, errors.New("provider returned no choices")
+		return Message{}, Usage{}, errors.New("provider returned no choices")
 	}
-	return data.Choices[0].Message, nil
+	usage := Usage{}
+	if data.Usage != nil && data.Usage.PromptTokens >= 0 && data.Usage.CompletionTokens >= 0 {
+		usage = Usage{InputTokens: data.Usage.PromptTokens, OutputTokens: data.Usage.CompletionTokens, Known: true}
+	}
+	return data.Choices[0].Message, usage, nil
 }

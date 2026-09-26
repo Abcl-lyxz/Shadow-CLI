@@ -1,6 +1,7 @@
 package broker
 
 import (
+	"bytes"
 	"context"
 	"crypto/sha256"
 	"crypto/tls"
@@ -8,7 +9,6 @@ import (
 	"encoding/json"
 	"errors"
 	"io"
-	"mime"
 	"net"
 	"net/http"
 	"net/netip"
@@ -45,13 +45,13 @@ var blockedDestinations = []netip.Prefix{
 // An explicit URL list is required because a GET method alone does not
 // establish that an endpoint is free of side effects. Not an agent tool.
 type Options struct {
-	AllowedURLs   []string
+	allowedURLs   []string
 	AllowLoopback bool // local fixtures only
 	lookup        func(context.Context, string) ([]net.IP, error)
 	interval      time.Duration
 }
 
-type Fetcher struct {
+type fetcher struct {
 	scope        policy.Scope
 	ip           net.IP
 	allowed      map[string]struct{}
@@ -62,7 +62,11 @@ type Fetcher struct {
 	interval     time.Duration
 	requestLimit int
 	guard        func(context.Context, string) error
+	deny         func(context.Context, string) error
+	reserveRun   func(context.Context) (func() error, error)
 	cleanupOnly  bool
+	writeOnly    bool
+	authOnly     bool
 }
 
 // Observation excludes body bytes, headers, path, and query. Hashes identify
@@ -77,16 +81,16 @@ type Observation struct {
 	Truncated   bool   `json:"truncated"`
 }
 
-func New(ctx context.Context, scope policy.Scope, opts Options) (*Fetcher, error) {
+func newFetcher(ctx context.Context, scope policy.Scope, opts Options) (*fetcher, error) {
 	u, err := url.Parse(scope.Origin)
 	if err != nil || u.Hostname() == "" || !scope.Allows(scope.Origin) {
 		return nil, errors.New("invalid scope")
 	}
-	if len(opts.AllowedURLs) == 0 {
+	if len(opts.allowedURLs) == 0 {
 		return nil, errors.New("explicit allowed URLs are required")
 	}
-	allowed := make(map[string]struct{}, len(opts.AllowedURLs))
-	for _, raw := range opts.AllowedURLs {
+	allowed := make(map[string]struct{}, len(opts.allowedURLs))
+	for _, raw := range opts.allowedURLs {
 		candidate, err := checkedURL(scope, raw)
 		if err != nil {
 			return nil, errors.New("allowed URL is outside exact-origin scope or malformed")
@@ -112,7 +116,7 @@ func New(ctx context.Context, scope policy.Scope, opts Options) (*Fetcher, error
 	if opts.interval > 0 {
 		interval = opts.interval
 	}
-	return &Fetcher{scope: scope, ip: ips[0], allowed: allowed, gate: make(chan struct{}, 1), interval: interval, requestLimit: maxRequests}, nil
+	return &fetcher{scope: scope, ip: ips[0], allowed: allowed, gate: make(chan struct{}, 1), interval: interval, requestLimit: maxRequests}, nil
 }
 
 func allowedDestination(ip net.IP, allowLoopback bool) bool {
@@ -143,11 +147,14 @@ func checkedURL(scope policy.Scope, raw string) (*url.URL, error) {
 	return u, nil
 }
 
-func (f *Fetcher) reserve(ctx context.Context) error {
+func (f *fetcher) reserve(ctx context.Context) (func() error, error) {
+	if f.reserveRun != nil {
+		return f.reserveRun(ctx)
+	}
 	f.mu.Lock()
 	if f.used >= f.requestLimit {
 		f.mu.Unlock()
-		return errors.New("request budget exhausted")
+		return nil, errors.New("request budget exhausted")
 	}
 	wait := time.Until(f.last.Add(f.interval))
 	f.mu.Unlock()
@@ -157,61 +164,92 @@ func (f *Fetcher) reserve(ctx context.Context) error {
 		select {
 		case <-timer.C:
 		case <-ctx.Done():
-			return ctx.Err()
+			return nil, ctx.Err()
 		}
 	}
 	f.mu.Lock()
 	f.used++
 	f.last = time.Now()
 	f.mu.Unlock()
-	return nil
+	return func() error { return nil }, nil
 }
 
-func (f *Fetcher) Get(ctx context.Context, raw string) (Observation, error) {
+func (f *fetcher) getObservation(ctx context.Context, raw string) (Observation, error) {
 	observation, _, err := f.get(ctx, raw)
 	return observation, err
 }
 
-// GetRecorded is the fixture-only path for evidence-backed observations.
-// It returns no observation when the encrypted evidence transaction fails.
-func (f *Fetcher) GetRecorded(ctx context.Context, runID, raw string, st *store.Store) (Observation, int64, error) {
-	if st == nil || runID == "" {
-		return Observation{}, 0, errors.New("evidence store and run id required")
+func (f *fetcher) get(ctx context.Context, raw string) (Observation, []byte, error) {
+	if f.cleanupOnly || f.writeOnly || f.authOnly {
+		return Observation{}, nil, errors.New("mutation fetcher cannot read")
 	}
-	observation, evidence, err := f.get(ctx, raw)
-	if err != nil {
-		return Observation{}, 0, err
-	}
-	id, err := st.RecordObservation(ctx, runID, store.EvidenceSummary(observation), evidence)
-	if err != nil {
-		return Observation{}, 0, err
-	}
-	return observation, id, nil
+	return f.request(ctx, http.MethodGet, raw, nil)
 }
 
-func (f *Fetcher) get(ctx context.Context, raw string) (Observation, []byte, error) {
-	if f.cleanupOnly {
-		return Observation{}, nil, errors.New("cleanup fetcher cannot read")
+func (f *fetcher) getWithCookie(ctx context.Context, raw, cookie string) (Observation, []byte, error) {
+	if f.cleanupOnly || f.writeOnly || f.authOnly || cookie == "" {
+		return Observation{}, nil, errors.New("authenticated fixture read unavailable")
 	}
-	return f.request(ctx, http.MethodGet, raw)
+	return f.requestWithHeaders(ctx, http.MethodGet, raw, nil, http.Header{"Cookie": []string{cookie}}, true)
+}
+
+func (f *fetcher) postAuth(ctx context.Context, raw, secret string) (Observation, []byte, error) {
+	if !f.authOnly || f.writeOnly || f.cleanupOnly || secret == "" {
+		return Observation{}, nil, errors.New("fixture authentication unavailable")
+	}
+	body, err := json.Marshal(struct {
+		Credential string `json:"credential"`
+	}{Credential: secret})
+	if err != nil {
+		return Observation{}, nil, errors.New("fixture credential encoding failed")
+	}
+	return f.requestWithHeaders(ctx, http.MethodPost, raw, body, nil, true)
 }
 
 // delete is used only by the run-bound loopback cleanup executor. A DELETE
 // redirect is never followed because its effect at the next URL is unknown.
-func (f *Fetcher) delete(ctx context.Context, raw string) (Observation, error) {
+func (f *fetcher) delete(ctx context.Context, raw string) (Observation, error) {
 	if !f.cleanupOnly {
 		return Observation{}, errors.New("read fetcher cannot delete")
 	}
-	observation, _, err := f.request(ctx, http.MethodDelete, raw)
+	observation, _, err := f.request(ctx, http.MethodDelete, raw, nil)
 	return observation, err
 }
 
-func (f *Fetcher) request(ctx context.Context, method, raw string) (Observation, []byte, error) {
-	if method != http.MethodGet && method != http.MethodDelete {
+// postMarker sends only the fixture's fixed marker contract. The caller cannot
+// supply arbitrary bytes, headers, or a method to this mutation fetcher.
+func (f *fetcher) postMarker(ctx context.Context, raw, resource string) (Observation, error) {
+	if !f.writeOnly || f.cleanupOnly || f.authOnly {
+		return Observation{}, errors.New("fixture writer unavailable")
+	}
+	body, err := json.Marshal(struct {
+		Resource string `json:"resource"`
+	}{Resource: resource})
+	if err != nil {
+		return Observation{}, err
+	}
+	observation, _, err := f.request(ctx, http.MethodPost, raw, body)
+	return observation, err
+}
+
+func (f *fetcher) request(ctx context.Context, method, raw string, body []byte) (Observation, []byte, error) {
+	return f.requestWithHeaders(ctx, method, raw, body, nil, false)
+}
+
+func (f *fetcher) requestWithHeaders(ctx context.Context, method, raw string, body []byte, headers http.Header, noRedirect bool) (Observation, []byte, error) {
+	if method != http.MethodGet && method != http.MethodDelete && method != http.MethodPost {
 		return Observation{}, nil, errors.New("unsupported fixture request method")
+	}
+	if method == http.MethodPost && (!(f.writeOnly || f.authOnly) || len(body) == 0) || method != http.MethodPost && len(body) != 0 {
+		return Observation{}, nil, errors.New("invalid fixture request body")
 	}
 	current, err := checkedURL(f.scope, raw)
 	if err != nil {
+		if f.deny != nil {
+			if recordErr := f.deny(ctx, raw); recordErr != nil {
+				return Observation{}, nil, recordErr
+			}
+		}
 		return Observation{}, nil, err
 	}
 	select {
@@ -245,23 +283,50 @@ func (f *Fetcher) request(ctx context.Context, method, raw string) (Observation,
 		if _, ok := f.allowed[current.String()]; !ok {
 			return Observation{}, nil, errors.New("URL is not explicitly allowed")
 		}
-		if err := f.reserve(ctx); err != nil {
+		status, responseHeader, responseBody, err := func() (status int, header http.Header, data []byte, err error) {
+			release, err := f.reserve(ctx)
+			if err != nil {
+				return 0, nil, nil, err
+			}
+			defer func() {
+				if releaseErr := release(); releaseErr != nil && err == nil {
+					err = releaseErr
+				}
+			}()
+			req, err := http.NewRequestWithContext(ctx, method, current.String(), bytes.NewReader(body))
+			if err != nil {
+				return 0, nil, nil, errors.New("invalid request URL")
+			}
+			req.Header.Set("User-Agent", "Shadow-CLI/0.1 authorized-security-test")
+			for name, values := range headers {
+				for _, value := range values {
+					req.Header.Add(name, value)
+				}
+			}
+			if method == http.MethodPost {
+				req.Header.Set("Content-Type", "application/json")
+			}
+			resp, err := client.Do(req)
+			if err != nil {
+				return 0, nil, nil, errors.New("target request failed")
+			}
+			defer resp.Body.Close()
+			if isRedirect(resp.StatusCode) {
+				return resp.StatusCode, resp.Header.Clone(), nil, nil
+			}
+			responseBody, err := io.ReadAll(io.LimitReader(resp.Body, maxBody+1))
+			if err != nil {
+				return 0, nil, nil, errors.New("response body read failed")
+			}
+			return resp.StatusCode, resp.Header.Clone(), responseBody, nil
+		}()
+		if err != nil {
 			return Observation{}, nil, err
 		}
-		req, err := http.NewRequestWithContext(ctx, method, current.String(), nil)
-		if err != nil {
-			return Observation{}, nil, errors.New("invalid request URL")
-		}
-		req.Header.Set("User-Agent", "Shadow-CLI/0.1 authorized-security-test")
-		resp, err := client.Do(req)
-		if err != nil {
-			return Observation{}, nil, errors.New("target request failed")
-		}
-		if isRedirect(resp.StatusCode) {
-			location := resp.Header.Get("Location")
-			resp.Body.Close()
-			if method != http.MethodGet {
-				return Observation{}, nil, errors.New("fixture cleanup redirect denied")
+		if isRedirect(status) {
+			location := responseHeader.Get("Location")
+			if method != http.MethodGet || noRedirect {
+				return Observation{}, nil, errors.New("fixture mutation redirect denied")
 			}
 			if redirects >= maxRedirects || location == "" {
 				return Observation{}, nil, errors.New("redirect limit reached or location missing")
@@ -270,29 +335,27 @@ func (f *Fetcher) request(ctx context.Context, method, raw string) (Observation,
 			if err != nil {
 				return Observation{}, nil, errors.New("invalid redirect location")
 			}
-			current, err = checkedURL(f.scope, current.ResolveReference(next).String())
+			resolved := current.ResolveReference(next).String()
+			current, err = checkedURL(f.scope, resolved)
 			if err != nil {
+				if f.deny != nil {
+					if recordErr := f.deny(ctx, resolved); recordErr != nil {
+						return Observation{}, nil, recordErr
+					}
+				}
 				return Observation{}, nil, errors.New("redirect left exact-origin scope")
 			}
 			continue
 		}
-		body, err := io.ReadAll(io.LimitReader(resp.Body, maxBody+1))
-		resp.Body.Close()
-		if err != nil {
-			return Observation{}, nil, errors.New("response body read failed")
-		}
-		truncated := len(body) > maxBody
+		truncated := len(responseBody) > maxBody
 		if truncated {
-			body = body[:maxBody]
+			responseBody = responseBody[:maxBody]
 		}
-		bodyHash := sha256.Sum256(body)
+		bodyHash := sha256.Sum256(responseBody)
 		urlHash := sha256.Sum256([]byte(current.String()))
-		contentType, _, err := mime.ParseMediaType(resp.Header.Get("Content-Type"))
-		if err != nil || len(contentType) > 128 {
-			contentType = ""
-		}
-		observation := Observation{Origin: f.scope.Origin, URLSHA256: hex.EncodeToString(urlHash[:]), Status: resp.StatusCode, ContentType: contentType, Bytes: len(body), SHA256: hex.EncodeToString(bodyHash[:]), Truncated: truncated}
-		evidence, err := json.Marshal(store.RawHTTP{RequestURL: current.String(), Method: method, Status: resp.StatusCode, Header: resp.Header.Clone(), Body: body, Truncated: truncated})
+		contentType := store.SafeContentType(responseHeader.Get("Content-Type"))
+		observation := Observation{Origin: f.scope.Origin, URLSHA256: hex.EncodeToString(urlHash[:]), Status: status, ContentType: contentType, Bytes: len(responseBody), SHA256: hex.EncodeToString(bodyHash[:]), Truncated: truncated}
+		evidence, err := json.Marshal(store.RawHTTP{RequestURL: current.String(), Method: method, Status: status, Header: responseHeader, Body: responseBody, Truncated: truncated})
 		if err != nil {
 			return Observation{}, nil, errors.New("raw response encoding failed")
 		}
@@ -314,4 +377,4 @@ func targetPort(u *url.URL) string {
 	return "80"
 }
 
-func (f *Fetcher) IP() string { return f.ip.String() }
+func (f *fetcher) ipString() string { return f.ip.String() }

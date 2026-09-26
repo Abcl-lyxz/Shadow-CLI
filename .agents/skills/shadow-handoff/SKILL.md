@@ -5,4 +5,4 @@ description: Update Shadow's current status and release-gate evidence when compl
 
 # Shadow handoff
 
-Read `docs/CURRENT_STATUS.md` and check the current repo state before editing it. Record what changed, the exact verification command and result, remaining gates, and the next concrete task. Distinguish a working local slice from a production release. Keep the status concise enough for a new session to resume without reading the full history.
+Read `docs/ROADMAP.md` and `docs/CURRENT_STATUS.md`, then check the current repo state before editing either file. Update phase checkboxes only for completed, verified work. Record what changed, the exact verification command and result, remaining gates, and the next unchecked task in the status document. Distinguish a working local slice from a production release. Keep the handoff concise enough to continue in this conversation after compaction or in a later session if the user chooses one. Never request a new session merely to conserve context.

@@ -19,7 +19,11 @@ const URL = "https://models.dev/api.json"
 type Model struct {
 	Name     string `json:"name"`
 	ToolCall bool   `json:"tool_call"`
-	Limit    struct {
+	Cost     *struct {
+		Input  float64 `json:"input"`
+		Output float64 `json:"output"`
+	} `json:"cost,omitempty"`
+	Limit struct {
 		Context int `json:"context"`
 		Output  int `json:"output"`
 	} `json:"limit"`

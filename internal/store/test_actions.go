@@ -1,6 +1,7 @@
 package store
 
 import (
+	"bytes"
 	"context"
 	"crypto/sha256"
 	"database/sql"
@@ -8,7 +9,9 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"net/url"
+	"strings"
 	"time"
 
 	"shadow/internal/policy"
@@ -21,6 +24,9 @@ const (
 	TestActionCleanupFailed    = "cleanup_failed"
 	TestActionCleanupObserved  = "cleanup_observed"
 	TestActionFixtureVerified  = "fixture_cleanup_verified"
+	FixtureMarkerProtocolV1    = "fixture_marker_v1"
+	FixtureRecordProtocolV1    = "fixture_record_v1"
+	legacyCleanupProtocol      = "legacy_untyped"
 )
 
 // TestAction contains only route hashes and a non-sensitive resource marker.
@@ -34,6 +40,7 @@ type TestAction struct {
 	URLSHA256          string `json:"url_sha256"`
 	CleanupMethod      string `json:"cleanup_method"`
 	CleanupURLSHA256   string `json:"cleanup_url_sha256"`
+	CleanupProtocol    string `json:"cleanup_protocol"`
 	Status             string `json:"status"`
 	PlannedEventID     int64  `json:"planned_event_id"`
 	WriteEventID       int64  `json:"write_event_id"`
@@ -44,12 +51,32 @@ type TestAction struct {
 	ReviewedStateID    int64  `json:"reviewed_state_event_id"`
 }
 
+// FixtureCleanupCompatible lets old untyped obligations finish only through
+// the fixture's full semantic evidence check. New generic plans cannot use it.
+func (a TestAction) FixtureCleanupCompatible(expected string) bool {
+	return a.CleanupProtocol == expected || expected == FixtureMarkerProtocolV1 && a.CleanupProtocol == legacyCleanupProtocol
+}
+
+// FixtureProtocolForRule selects a local-only resource contract in host code.
+// Record fixtures use fixed routes and a separate state shape from markers.
+func FixtureProtocolForRule(rule policy.ActionRule) (string, error) {
+	if strings.HasPrefix(rule.Resource, "shadow_record_") {
+		write, writeErr := url.Parse(rule.URL)
+		read, readErr := url.Parse(rule.CleanupURL)
+		if writeErr != nil || readErr != nil || write.RawQuery != "" || read.RawQuery != "" || write.EscapedPath() != "/records" || read.EscapedPath() != "/records/"+rule.Resource || rule.Method != "POST" || rule.CleanupMethod != "DELETE" {
+			return "", errors.New("fixture record requires exact records routes")
+		}
+		return FixtureRecordProtocolV1, nil
+	}
+	return FixtureMarkerProtocolV1, nil
+}
+
 func migrateTestActionState(db *sql.DB) error {
 	rows, err := db.Query("PRAGMA table_info(test_actions)")
 	if err != nil {
 		return err
 	}
-	hasColumn := false
+	hasColumn, hasProtocol := false, false
 	for rows.Next() {
 		var index, notNull, primary int
 		var name, dataType string
@@ -61,12 +88,20 @@ func migrateTestActionState(db *sql.DB) error {
 		if name == "state_event_id" {
 			hasColumn = true
 		}
+		if name == "cleanup_protocol" {
+			hasProtocol = true
+		}
 	}
 	if err := rows.Err(); err != nil {
 		rows.Close()
 		return err
 	}
 	rows.Close()
+	if !hasProtocol {
+		if _, err := db.Exec("ALTER TABLE test_actions ADD COLUMN cleanup_protocol TEXT NOT NULL DEFAULT 'legacy_untyped'"); err != nil {
+			return err
+		}
+	}
 	if !hasColumn {
 		if _, err := db.Exec("ALTER TABLE test_actions ADD COLUMN state_event_id INTEGER NOT NULL DEFAULT 0"); err != nil {
 			return err
@@ -136,6 +171,16 @@ func actionEvent(ctx context.Context, tx *sql.Tx, runID, kind string, payload an
 // PlanTestWrite persists the cleanup obligation before any network action.
 // Only a trusted runtime caller should construct the action policy.
 func (s *Store) PlanTestWrite(ctx context.Context, runID string, decision policy.ActionDecision) (int64, error) {
+	return s.planTestWrite(ctx, runID, decision, false)
+}
+
+// PlanFixtureTestWrite reserves one named marker per origin. An interrupted or
+// unverified action blocks another fixture write to that marker in any run.
+func (s *Store) PlanFixtureTestWrite(ctx context.Context, runID string, decision policy.ActionDecision) (int64, error) {
+	return s.planTestWrite(ctx, runID, decision, true)
+}
+
+func (s *Store) planTestWrite(ctx context.Context, runID string, decision policy.ActionDecision, exclusive bool) (int64, error) {
 	rule := decision.Rule
 	u, err := url.Parse(rule.URL)
 	if err != nil || u == nil || runID == "" || !decision.Allowed || rule.Effect != policy.EffectTestWrite {
@@ -149,6 +194,11 @@ func (s *Store) PlanTestWrite(ctx context.Context, runID string, decision policy
 	if err != nil || !validated.Classify(rule.Method, rule.URL).Allowed {
 		return 0, errors.New("invalid test write plan")
 	}
+	unlock, err := s.beginProvenanceMutation(ctx)
+	if err != nil {
+		return 0, err
+	}
+	defer unlock()
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
 		return 0, err
@@ -171,16 +221,32 @@ func (s *Store) PlanTestWrite(ctx context.Context, runID string, decision policy
 	if !granted {
 		return 0, errors.New("test write is not in the run action snapshot")
 	}
+	if exclusive {
+		var pending bool
+		if err := tx.QueryRowContext(ctx, "SELECT EXISTS(SELECT 1 FROM test_actions WHERE origin=? AND resource=? AND status!=?)", scope.Origin, rule.Resource, TestActionFixtureVerified).Scan(&pending); err != nil {
+			return 0, err
+		}
+		if pending {
+			return 0, errors.New("named fixture marker has an unresolved test action")
+		}
+	}
 	urlHash, cleanupHash := routeHash(rule.URL), routeHash(rule.CleanupURL)
+	protocol := ""
+	if exclusive {
+		protocol, err = FixtureProtocolForRule(rule)
+		if err != nil {
+			return 0, err
+		}
+	}
 	eventID, err := actionEvent(ctx, tx, runID, "test_write_planned", map[string]string{
 		"origin": scope.Origin, "resource": rule.Resource, "method": rule.Method,
-		"url_sha256": urlHash, "cleanup_method": rule.CleanupMethod, "cleanup_url_sha256": cleanupHash,
+		"url_sha256": urlHash, "cleanup_method": rule.CleanupMethod, "cleanup_url_sha256": cleanupHash, "cleanup_protocol": protocol,
 	})
 	if err != nil {
 		return 0, err
 	}
-	result, err := tx.ExecContext(ctx, "INSERT INTO test_actions(run_id,origin,resource,method,url_sha256,cleanup_method,cleanup_url_sha256,status,planned_event_id,state_event_id) VALUES(?,?,?,?,?,?,?,?,?,?)",
-		runID, scope.Origin, rule.Resource, rule.Method, urlHash, rule.CleanupMethod, cleanupHash, TestActionPlanned, eventID, eventID)
+	result, err := tx.ExecContext(ctx, "INSERT INTO test_actions(run_id,origin,resource,method,url_sha256,cleanup_method,cleanup_url_sha256,cleanup_protocol,status,planned_event_id,state_event_id) VALUES(?,?,?,?,?,?,?,?,?,?,?)",
+		runID, scope.Origin, rule.Resource, rule.Method, urlHash, rule.CleanupMethod, cleanupHash, protocol, TestActionPlanned, eventID, eventID)
 	if err != nil {
 		return 0, err
 	}
@@ -188,7 +254,10 @@ func (s *Store) PlanTestWrite(ctx context.Context, runID string, decision policy
 	if err != nil {
 		return 0, err
 	}
-	return id, tx.Commit()
+	if err := s.commitWithProvenance(ctx, tx, "test_write_planned"); err != nil {
+		return 0, err
+	}
+	return id, nil
 }
 
 // MarkTestWritePossible must be called before dispatch, so a crash or timeout
@@ -223,18 +292,33 @@ func (s *Store) RecordCleanupObservation(ctx context.Context, runID string, id, 
 	return s.advanceTestAction(ctx, runID, id, TestActionCleanupAttempted, TestActionCleanupObserved, "cleanup_observed", "observation_event_id", observationEventID)
 }
 
+// ReinspectFixtureCleanup links a fresh read to an unresolved observation.
+// It never dispatches another mutation or treats the previous read as proof.
+func (s *Store) ReinspectFixtureCleanup(ctx context.Context, runID string, id, observationEventID int64) error {
+	observation, err := s.observationInRun(ctx, runID, observationEventID)
+	if err != nil {
+		return errors.New("cleanup reinspection requires same-run authenticated evidence")
+	}
+	var origin, protocol string
+	var previousID int64
+	if err := s.db.QueryRowContext(ctx, "SELECT origin,cleanup_protocol,observation_event_id FROM test_actions WHERE id=? AND run_id=?", id, runID).Scan(&origin, &protocol, &previousID); err != nil || origin != observation.Origin || observationEventID <= previousID || (protocol != FixtureMarkerProtocolV1 && protocol != FixtureRecordProtocolV1 && protocol != legacyCleanupProtocol) {
+		return errors.New("cleanup reinspection must match an unresolved fixture action")
+	}
+	return s.advanceTestAction(ctx, runID, id, TestActionCleanupObserved, TestActionCleanupObserved, "cleanup_reinspected", "observation_event_id", observationEventID)
+}
+
 // VerifyFixtureCleanup recognizes only the local fixture's resource contract:
 // a recorded GET showing the named marker present after the possible write,
 // followed by a recorded GET showing it absent after the DELETE attempt. This
 // does not establish cleanup semantics for an arbitrary target API.
-func (s *Store) VerifyFixtureCleanup(ctx context.Context, runID string, id, beforeID int64, readURL string) error {
+func (s *Store) VerifyFixtureCleanup(ctx context.Context, runID string, id, beforeID int64, readURL, expectedProtocol string) error {
 	if runID == "" || id <= 0 || beforeID <= 0 || readURL == "" {
 		return errors.New("fixture cleanup verification inputs required")
 	}
-	var resource, origin, status string
+	var resource, origin, status, protocol, cleanupHash string
 	var writeID, cleanupID, afterID int64
-	err := s.db.QueryRowContext(ctx, "SELECT resource,origin,status,write_event_id,cleanup_event_id,observation_event_id FROM test_actions WHERE id=? AND run_id=?", id, runID).Scan(&resource, &origin, &status, &writeID, &cleanupID, &afterID)
-	if err != nil || status != TestActionCleanupObserved || !(writeID < beforeID && beforeID < cleanupID && cleanupID < afterID) {
+	err := s.db.QueryRowContext(ctx, "SELECT resource,origin,status,cleanup_protocol,cleanup_url_sha256,write_event_id,cleanup_event_id,observation_event_id FROM test_actions WHERE id=? AND run_id=?", id, runID).Scan(&resource, &origin, &status, &protocol, &cleanupHash, &writeID, &cleanupID, &afterID)
+	if err != nil || status != TestActionCleanupObserved || cleanupHash != routeHash(readURL) || !((protocol == expectedProtocol && (protocol == FixtureMarkerProtocolV1 || protocol == FixtureRecordProtocolV1)) || (expectedProtocol == FixtureMarkerProtocolV1 && protocol == legacyCleanupProtocol)) || !(writeID < beforeID && beforeID < cleanupID && cleanupID < afterID) {
 		return errors.New("fixture cleanup evidence is missing or out of order")
 	}
 	snapshot, err := s.RunSnapshot(ctx, runID)
@@ -253,22 +337,31 @@ func (s *Store) VerifyFixtureCleanup(ctx context.Context, runID string, id, befo
 	if err != nil {
 		return errors.New("fixture absence evidence is invalid")
 	}
-	if !FixtureMarkerState(before, beforeRaw, readURL, resource, true) || !FixtureMarkerState(after, afterRaw, readURL, resource, false) {
+	check := FixtureMarkerState
+	if protocol == FixtureRecordProtocolV1 {
+		check = FixtureRecordState
+	}
+	if !check(before, beforeRaw, readURL, resource, true) || !check(after, afterRaw, readURL, resource, false) {
 		return errors.New("fixture resource state was not verified")
 	}
+	unlock, err := s.beginProvenanceMutation(ctx)
+	if err != nil {
+		return err
+	}
+	defer unlock()
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
 		return err
 	}
 	defer tx.Rollback()
 	eventID, err := actionEvent(ctx, tx, runID, "fixture_cleanup_verified", map[string]any{
-		"test_action_id": id, "status": TestActionFixtureVerified,
+		"test_action_id": id, "status": TestActionFixtureVerified, "cleanup_protocol": protocol,
 		"presence_event_id": beforeID, "absence_event_id": afterID,
 	})
 	if err != nil {
 		return err
 	}
-	result, err := tx.ExecContext(ctx, "UPDATE test_actions SET status=?,state_event_id=? WHERE id=? AND run_id=? AND status=? AND observation_event_id=? AND write_event_id<? AND cleanup_event_id>? AND cleanup_event_id<?", TestActionFixtureVerified, eventID, id, runID, TestActionCleanupObserved, afterID, beforeID, beforeID, afterID)
+	result, err := tx.ExecContext(ctx, "UPDATE test_actions SET status=?,state_event_id=? WHERE id=? AND run_id=? AND status=? AND cleanup_protocol=? AND observation_event_id=? AND write_event_id<? AND cleanup_event_id>? AND cleanup_event_id<?", TestActionFixtureVerified, eventID, id, runID, TestActionCleanupObserved, protocol, afterID, beforeID, beforeID, afterID)
 	if err != nil {
 		return err
 	}
@@ -276,7 +369,33 @@ func (s *Store) VerifyFixtureCleanup(ctx context.Context, runID string, id, befo
 	if err != nil || count != 1 {
 		return errors.New("fixture cleanup state changed before verification")
 	}
-	return tx.Commit()
+	return s.commitWithProvenance(ctx, tx, "fixture_cleanup_verified")
+}
+
+// FixtureRecordState accepts only the complete, exact resource state document.
+// A success code or an unfamiliar field cannot assert that cleanup happened.
+func FixtureRecordState(summary EvidenceSummary, raw RawHTTP, readURL, resource string, present bool) bool {
+	if summary.Truncated || summary.ContentType != "application/json" || raw.RequestURL != readURL || raw.Method != "GET" || strings.HasPrefix(resource, "shadow_record_") == false {
+		return false
+	}
+	if present && summary.Status != 200 || !present && summary.Status != 410 {
+		return false
+	}
+	var state struct {
+		Record struct {
+			ID     string `json:"id"`
+			Status string `json:"status"`
+		} `json:"record"`
+	}
+	decoder := json.NewDecoder(bytes.NewReader(raw.Body))
+	decoder.DisallowUnknownFields()
+	if decoder.Decode(&state) != nil || decoder.Decode(new(any)) != io.EOF || state.Record.ID != resource {
+		return false
+	}
+	if present {
+		return state.Record.Status == "active"
+	}
+	return state.Record.Status == "deleted"
 }
 
 // FixtureMarkerState is the narrow JSON contract used by local cleanup fixtures.
@@ -301,6 +420,11 @@ func (s *Store) advanceTestAction(ctx context.Context, runID string, id int64, f
 	if runID == "" || id <= 0 {
 		return errors.New("run and test action required")
 	}
+	unlock, err := s.beginProvenanceMutation(ctx)
+	if err != nil {
+		return err
+	}
+	defer unlock()
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
 		return err
@@ -317,8 +441,8 @@ func (s *Store) advanceTestAction(ctx context.Context, runID string, id int64, f
 		query = "UPDATE test_actions SET status=?, state_event_id=?, " + column + "=? WHERE id=? AND run_id=? AND status=?"
 		args = []any{to, eventID, eventID, id, runID, from}
 	case "observation_event_id":
-		query = "UPDATE test_actions SET status=?, state_event_id=?, observation_event_id=? WHERE id=? AND run_id=? AND status=? AND cleanup_event_id<? AND EXISTS(SELECT 1 FROM evidence WHERE event_id=? AND run_id=?)"
-		args = []any{to, eventID, observationID, id, runID, from, observationID, observationID, runID}
+		query = "UPDATE test_actions SET status=?, state_event_id=?, observation_event_id=? WHERE id=? AND run_id=? AND status=? AND cleanup_event_id<? AND COALESCE(observation_event_id,0)<? AND EXISTS(SELECT 1 FROM evidence WHERE event_id=? AND run_id=?)"
+		args = []any{to, eventID, observationID, id, runID, from, observationID, observationID, observationID, runID}
 	case "":
 	default:
 		return errors.New("invalid test action transition")
@@ -334,14 +458,14 @@ func (s *Store) advanceTestAction(ctx context.Context, runID string, id int64, f
 	if count != 1 {
 		return errors.New("test action transition rejected")
 	}
-	return tx.Commit()
+	return s.commitWithProvenance(ctx, tx, "test_action_state")
 }
 
 func (s *Store) TestActions(ctx context.Context, runID string) ([]TestAction, error) {
 	if runID == "" {
 		return nil, errors.New("run required")
 	}
-	rows, err := s.db.QueryContext(ctx, "SELECT a.id,a.run_id,a.origin,a.resource,a.method,a.url_sha256,a.cleanup_method,a.cleanup_url_sha256,a.status,a.planned_event_id,COALESCE(a.write_event_id,0),COALESCE(a.cleanup_event_id,0),COALESCE(a.observation_event_id,0),a.state_event_id,COALESCE(r.review_event_id,0),COALESCE(r.state_event_id,0) FROM test_actions a LEFT JOIN test_action_reviews r ON r.id=(SELECT MAX(id) FROM test_action_reviews WHERE action_id=a.id AND run_id=a.run_id) WHERE a.run_id=? ORDER BY a.id", runID)
+	rows, err := s.db.QueryContext(ctx, "SELECT a.id,a.run_id,a.origin,a.resource,a.method,a.url_sha256,a.cleanup_method,a.cleanup_url_sha256,a.cleanup_protocol,a.status,a.planned_event_id,COALESCE(a.write_event_id,0),COALESCE(a.cleanup_event_id,0),COALESCE(a.observation_event_id,0),a.state_event_id,COALESCE(r.review_event_id,0),COALESCE(r.state_event_id,0) FROM test_actions a LEFT JOIN test_action_reviews r ON r.id=(SELECT MAX(id) FROM test_action_reviews WHERE action_id=a.id AND run_id=a.run_id) WHERE a.run_id=? ORDER BY a.id", runID)
 	if err != nil {
 		return nil, err
 	}
@@ -349,7 +473,7 @@ func (s *Store) TestActions(ctx context.Context, runID string) ([]TestAction, er
 	var out []TestAction
 	for rows.Next() {
 		var a TestAction
-		if err := rows.Scan(&a.ID, &a.RunID, &a.Origin, &a.Resource, &a.Method, &a.URLSHA256, &a.CleanupMethod, &a.CleanupURLSHA256, &a.Status, &a.PlannedEventID, &a.WriteEventID, &a.CleanupEventID, &a.ObservationEventID, &a.StateEventID, &a.ReviewEventID, &a.ReviewedStateID); err != nil {
+		if err := rows.Scan(&a.ID, &a.RunID, &a.Origin, &a.Resource, &a.Method, &a.URLSHA256, &a.CleanupMethod, &a.CleanupURLSHA256, &a.CleanupProtocol, &a.Status, &a.PlannedEventID, &a.WriteEventID, &a.CleanupEventID, &a.ObservationEventID, &a.StateEventID, &a.ReviewEventID, &a.ReviewedStateID); err != nil {
 			return nil, err
 		}
 		out = append(out, a)
@@ -363,6 +487,11 @@ func (s *Store) ReviewTestAction(ctx context.Context, runID string, id, expected
 	if runID == "" || id <= 0 || expectedStateEventID <= 0 {
 		return errors.New("run, action ID, and observed state event ID required")
 	}
+	unlock, err := s.beginProvenanceMutation(ctx)
+	if err != nil {
+		return err
+	}
+	defer unlock()
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
 		return err
@@ -391,5 +520,5 @@ func (s *Store) ReviewTestAction(ctx context.Context, runID string, id, expected
 	if _, err := tx.ExecContext(ctx, "INSERT INTO test_action_reviews(run_id,action_id,state_event_id,review_event_id,status) VALUES(?,?,?,?,?)", runID, id, stateEventID, eventID, status); err != nil {
 		return fmt.Errorf("record test action review: %w", err)
 	}
-	return tx.Commit()
+	return s.commitWithProvenance(ctx, tx, "test_action_review")
 }

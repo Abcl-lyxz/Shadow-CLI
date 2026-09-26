@@ -21,12 +21,12 @@ const (
 // ActionRule describes one exact request. A test write must name its own
 // disposable resource and an exact cleanup request before it can be planned.
 type ActionRule struct {
-	URL           string
-	Method        string
-	Effect        Effect
-	Resource      string
-	CleanupURL    string
-	CleanupMethod string
+	URL           string `json:"url"`
+	Method        string `json:"method"`
+	Effect        Effect `json:"effect"`
+	Resource      string `json:"resource,omitempty"`
+	CleanupURL    string `json:"cleanup_url,omitempty"`
+	CleanupMethod string `json:"cleanup_method,omitempty"`
 }
 
 type ActionDecision struct {
@@ -44,7 +44,7 @@ var resourceName = regexp.MustCompile(`^shadow_[a-z0-9][a-z0-9_-]{0,55}$`)
 
 func actionURL(scope Scope, raw string) (string, error) {
 	u, err := url.Parse(raw)
-	if err != nil || u == nil || (u.Scheme != "http" && u.Scheme != "https") || u.Hostname() == "" || u.Opaque != "" || u.Fragment != "" || u.RawFragment != "" || !scope.Allows(raw) {
+	if err != nil || u == nil || (u.Scheme != "http" && u.Scheme != "https") || u.Hostname() == "" || u.User != nil || u.Opaque != "" || u.Fragment != "" || u.RawFragment != "" || !scope.Allows(raw) {
 		return "", errors.New("action URL must be an exact in-scope HTTP URL without a fragment")
 	}
 	return u.String(), nil
@@ -75,6 +75,10 @@ func NewActionPolicy(scope Scope, rules []ActionRule) (*ActionPolicy, error) {
 		case EffectAuth:
 			if rule.Method != http.MethodPost {
 				return nil, errors.New("authentication rule requires POST")
+			}
+			loginURL, err := url.Parse(rule.URL)
+			if err != nil || loginURL.RawQuery != "" {
+				return nil, errors.New("authentication URL cannot carry query credentials")
 			}
 		case EffectTestWrite:
 			if rule.Method != http.MethodPost && rule.Method != http.MethodPut && rule.Method != http.MethodPatch {

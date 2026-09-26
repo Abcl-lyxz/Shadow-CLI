@@ -65,3 +65,23 @@ func TestProviderRedirectIsBlocked(t *testing.T) {
 		t.Fatal("provider redirect was followed")
 	}
 }
+
+func TestChatUsageAndOutputRequestLimit(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var request struct {
+			MaxTokens int64 `json:"max_tokens"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&request); err != nil {
+			t.Error(err)
+		}
+		if request.MaxTokens != 7 {
+			t.Errorf("max_tokens=%d", request.MaxTokens)
+		}
+		_, _ = w.Write([]byte(`{"choices":[{"message":{"role":"assistant","content":"ok"}}],"usage":{"prompt_tokens":11,"completion_tokens":2}}`))
+	}))
+	defer server.Close()
+	_, usage, err := (Client{BaseURL: server.URL, Key: "key"}).ChatWithUsageLimit(context.Background(), "test", []Message{{Role: "user", Content: "hi"}}, nil, 7)
+	if err != nil || !usage.Known || usage.InputTokens != 11 || usage.OutputTokens != 2 {
+		t.Fatalf("usage %#v %v", usage, err)
+	}
+}

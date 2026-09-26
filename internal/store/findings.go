@@ -14,15 +14,16 @@ const (
 )
 
 type Finding struct {
-	ID                  int64     `json:"id"`
-	RunID               string    `json:"run_id"`
-	Title               string    `json:"title"`
-	Asset               string    `json:"asset"`
-	ClaimType           string    `json:"claim_type"`
-	Status              string    `json:"status"`
-	SourceEventID       int64     `json:"source_event_id"`
-	ReproductionEventID int64     `json:"reproduction_event_id,omitempty"`
-	CreatedAt           time.Time `json:"created_at"`
+	ID                  int64          `json:"id"`
+	RunID               string         `json:"run_id"`
+	Title               string         `json:"title"`
+	Asset               string         `json:"asset"`
+	ClaimType           string         `json:"claim_type"`
+	Status              string         `json:"status"`
+	SourceEventID       int64          `json:"source_event_id"`
+	ReproductionEventID int64          `json:"reproduction_event_id,omitempty"`
+	CreatedAt           time.Time      `json:"created_at"`
+	Review              *FindingReview `json:"review,omitempty"`
 }
 
 // CreateFinding requires encrypted source evidence in the same run. A security
@@ -41,6 +42,11 @@ func (s *Store) CreateFinding(ctx context.Context, runID, title, asset, claimTyp
 	if _, err := s.RawEvidence(ctx, runID, sourceEventID); err != nil {
 		return 0, errors.New("source evidence is unavailable or tampered")
 	}
+	unlock, err := s.beginProvenanceMutation(ctx)
+	if err != nil {
+		return 0, err
+	}
+	defer unlock()
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
 		return 0, err
@@ -58,7 +64,7 @@ func (s *Store) CreateFinding(ctx context.Context, runID, title, asset, claimTyp
 	if _, err := tx.ExecContext(ctx, "INSERT INTO events(run_id,at,kind,payload) VALUES(?,?,?,?)", runID, at, "finding_created", []byte(fmt.Sprintf(`{"finding_id":%d}`, id))); err != nil {
 		return 0, err
 	}
-	if err := tx.Commit(); err != nil {
+	if err := s.commitWithProvenance(ctx, tx, "finding_created"); err != nil {
 		return 0, err
 	}
 	return id, nil
@@ -120,7 +126,17 @@ func (s *Store) VerifyResponseFinding(ctx context.Context, runID string, finding
 	if _, err := s.RawEvidence(ctx, runID, reproductionEventID); err != nil {
 		return errors.New("reproduction evidence is unavailable or tampered")
 	}
-	result, err := s.db.ExecContext(ctx, "UPDATE findings SET status='verified', reproduction_event_id=? WHERE id=? AND run_id=? AND status='hypothesis'", reproductionEventID, findingID, runID)
+	unlock, err := s.beginProvenanceMutation(ctx)
+	if err != nil {
+		return err
+	}
+	defer unlock()
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	result, err := tx.ExecContext(ctx, "UPDATE findings SET status='verified', reproduction_event_id=? WHERE id=? AND run_id=? AND status='hypothesis'", reproductionEventID, findingID, runID)
 	if err != nil {
 		return err
 	}
@@ -131,7 +147,20 @@ func (s *Store) VerifyResponseFinding(ctx context.Context, runID string, finding
 	if count != 1 {
 		return errors.New("finding status changed")
 	}
-	return nil
+	now := time.Now().UTC()
+	expires := now.Add(30 * 24 * time.Hour)
+	var asset string
+	if err := tx.QueryRowContext(ctx, "SELECT asset FROM findings WHERE id=? AND run_id=?", findingID, runID).Scan(&asset); err != nil {
+		return err
+	}
+	verificationEventID, err := actionEvent(ctx, tx, runID, "response_reproduced", map[string]any{"finding_id": findingID, "source_event_id": sourceID, "reproduction_event_id": reproductionEventID, "confidence": "reproduced_response", "expires_at": expires.Format(time.RFC3339Nano)})
+	if err != nil {
+		return err
+	}
+	if _, err := tx.ExecContext(ctx, "INSERT INTO verified_response_memory(finding_id,scope,source_event_id,repeat_event_id,verification_event_id,confidence,expires_at,created_at) VALUES(?,?,?,?,?,?,?,?)", findingID, asset, sourceID, reproductionEventID, verificationEventID, "reproduced_response", expires.Format(time.RFC3339Nano), now.Format(time.RFC3339Nano)); err != nil {
+		return err
+	}
+	return s.commitWithProvenance(ctx, tx, "response_reproduced")
 }
 
 func (s *Store) Findings(ctx context.Context, runID string) ([]Finding, error) {
@@ -161,4 +190,15 @@ func (s *Store) Findings(ctx context.Context, runID string) ([]Finding, error) {
 		out = append(out, f)
 	}
 	return out, rows.Err()
+}
+
+// LatestResponseReproductionEventID allows report review ordering without
+// loading the run's potentially large event payloads into memory.
+func (s *Store) LatestResponseReproductionEventID(ctx context.Context, runID string, findingID int64) (int64, error) {
+	if runID == "" || findingID <= 0 {
+		return 0, errors.New("run and finding required")
+	}
+	var id int64
+	err := s.db.QueryRowContext(ctx, "SELECT COALESCE(MAX(id),0) FROM events WHERE run_id=? AND kind='response_reproduced' AND json_extract(payload,'$.finding_id')=?", runID, findingID).Scan(&id)
+	return id, err
 }
