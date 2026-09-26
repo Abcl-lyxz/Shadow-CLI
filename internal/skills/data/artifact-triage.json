@@ -1,0 +1,5 @@
+{
+  "name": "artifact-triage",
+  "description": "Classify attached source or binaries and record safe static observations.",
+  "instructions": "Work only in the read-only /workspace mount. Begin with file type, size, hash, and directory inventory. Use parsing and static inspection before execution. Do not run an untrusted application or installer. Record every observation with the tool event ID; distinguish data from inferred vulnerability."
+}

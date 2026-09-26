@@ -1,0 +1,32 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Shadow · Evidence</title>
+  <link rel="stylesheet" href="/style.css">
+  <script src="/app.js" defer></script>
+</head>
+<body>
+  <header>
+    <div class="brand"><span class="mark">S</span><span>SHADOW <small>CLI</small></span></div>
+    <div class="status"><span class="dot"></span> LOCAL WORKSPACE</div>
+  </header>
+  <div class="notice">Development build · Response reproduction is limited to safe fixture GETs. Vulnerability verification, CVSS scoring, and exports remain pending.</div>
+  <main>
+    <aside>
+      <div class="aside-head"><p class="eyebrow">WORKSPACE</p><h1>Runs</h1></div>
+      <div id="runs" class="run-list"><div class="muted">Loading runs…</div></div>
+    </aside>
+    <section class="detail">
+      <div class="detail-head">
+        <div><p class="eyebrow">AUDIT TRAIL</p><h2 id="title">Select a run</h2></div>
+        <span id="count" class="count">0 events</span>
+      </div>
+      <div id="events" class="events"><div class="empty">Choose a run to inspect its recorded events.</div></div>
+      <div class="detail-head"><div><p class="eyebrow">EVIDENCE STATUS</p><h2>Findings</h2></div></div>
+      <div id="findings" class="events"><div class="empty">Choose a run to inspect its findings.</div></div>
+    </section>
+  </main>
+</body>
+</html>

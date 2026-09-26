@@ -1,0 +1,20 @@
+{
+  "description": "Load the concise Shadow handoff at session start and after compaction.",
+  "hooks": {
+    "SessionStart": [
+      {
+        "matcher": "startup|resume|compact",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "sh -c 'r=$(git rev-parse --show-toplevel); GOCACHE=\"$r/.cache/go-build\" go run \"$r/.codex/hooks/handoff.go\"'",
+            "commandWindows": "powershell -NoProfile -Command \"$r = git rev-parse --show-toplevel; $env:GOCACHE = Join-Path $r '.cache/go-build'; go run (Join-Path $r '.codex/hooks/handoff.go')\"",
+            "statusMessage": "Loading Shadow handoff",
+            "additionalContextLimit": 4000,
+            "timeout": 20
+          }
+        ]
+      }
+    ]
+  }
+}

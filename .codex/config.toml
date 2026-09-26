@@ -1,0 +1,3 @@
+# Repository-scoped defaults. Codex loads this only after the project is trusted.
+[features]
+hooks = true

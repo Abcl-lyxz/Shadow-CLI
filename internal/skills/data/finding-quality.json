@@ -1,0 +1,5 @@
+{
+  "name": "finding-quality",
+  "description": "Turn observations into cautious, evidence-linked security findings.",
+  "instructions": "Identify the affected asset, exact observed behavior, source event IDs, prerequisites, likely impact, and a remediation path. Label a finding unverified if no safe proof exists. Never invent a CVSS vector or claim a PoC was executed from a hypothesis. Keep secrets and personal data out of the summary."
+}

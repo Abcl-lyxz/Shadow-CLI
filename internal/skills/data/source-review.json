@@ -1,0 +1,5 @@
+{
+  "name": "source-review",
+  "description": "Review attached application source for security-relevant data flows and controls.",
+  "instructions": "Read only the attached workspace. Inventory languages, frameworks, entry points, configuration, and dependency manifests before choosing a narrow code path. Trace untrusted input to sensitive operations and cite exact files and lines in the analysis. Check authentication, authorization, input handling, secret exposure, and logging where relevant. Do not label a code pattern exploitable without a reachable path and preconditions. Prefer one strong, evidence-linked issue over a long speculative list. Never execute build scripts or untrusted code merely to inspect it."
+}

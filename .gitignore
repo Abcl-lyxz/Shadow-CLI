@@ -1,0 +1,9 @@
+/bin/
+/dist/
+/web/dist/
+/coverage.out
+/.cache/
+/.shadow/
+*.test
+*.exe
+!scripts/*.exe

@@ -1,0 +1,15 @@
+prefix_rule(
+    pattern = ["git", "push"],
+    decision = "prompt",
+    justification = "Review the remote and branch before publishing Shadow changes.",
+    match = ["git push origin main"],
+    not_match = ["git status"],
+)
+
+prefix_rule(
+    pattern = ["docker", "run", "--privileged"],
+    decision = "forbidden",
+    justification = "Use the restricted Docker sandbox configuration instead of privileged containers.",
+    match = ["docker run --privileged alpine:latest sh"],
+    not_match = ["docker run --rm alpine:latest sh"],
+)

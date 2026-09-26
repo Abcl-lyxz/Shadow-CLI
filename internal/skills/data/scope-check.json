@@ -1,0 +1,5 @@
+{
+  "name": "scope-check",
+  "description": "Check target boundaries and action effects before proposing a test.",
+  "instructions": "Use the exact origin shown in the task. Do not expand to subdomains, third-party redirects, or resolved sibling IPs. Classify an action as read, bounded test write, or prohibited. RCE, destructive changes, denial of service, and effects that cannot be bounded are prohibited. In this development build, live target requests and test writes are disabled; describe a manual verification plan instead."
+}

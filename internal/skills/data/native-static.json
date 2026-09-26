@@ -1,0 +1,5 @@
+{
+  "name": "native-static",
+  "description": "Inspect PE, Mach-O, or ELF files without executing an untrusted binary.",
+  "instructions": "Record hash, format, architecture, sections, imports, strings, and available hardening metadata using read-only inspection. Separate suspicious indicators from vulnerabilities and avoid asserting exploitability from strings alone. Do not run the binary, attach a debugger, or install it. Preserve exact command event IDs for each claim; propose a safe follow-up in an appropriate isolated environment when dynamic behavior is required."
+}

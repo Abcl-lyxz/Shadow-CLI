@@ -1,0 +1,5 @@
+{
+  "name": "mobile-static",
+  "description": "Inspect APK or IPA files with static tools inside the Linux sandbox.",
+  "instructions": "Confirm the artifact type and hash first. For APK, inspect manifest, exported components, permissions, cleartext traffic policy, embedded endpoints, and native libraries using read-only tools. For IPA, inspect bundle metadata, entitlements, transport security settings, and embedded resources without claiming iOS execution. Keep extracted files in /tmp and do not run the application. Report observations with tool event IDs and mark runtime-dependent issues unverified."
+}
