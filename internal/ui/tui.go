@@ -17,6 +17,7 @@ import (
 
 	"shadow/internal/agent"
 	"shadow/internal/artifact"
+	"shadow/internal/broker"
 	"shadow/internal/catalog"
 	"shadow/internal/config"
 	"shadow/internal/dashboard"
@@ -83,6 +84,7 @@ type Model struct {
 	manualPriceRoute  config.Route
 	manualInputPrice  float64
 	manualOutputPrice float64
+	approvedReads     *policy.VerifiedRules
 }
 
 func Run() error {
@@ -119,7 +121,7 @@ func Run() error {
 		lines: []string{
 			"Shadow CLI • development build",
 			"Use /connect to choose a provider, /models to choose a model, /target URL, then describe a task.",
-			"Live web requests and test writes are disabled until the security release gates pass.",
+			"Network tools are closed by default. /rules loads an operator-approved exact GET/read plan; test writes remain disabled.",
 		},
 	}
 	if retention.Purged > 0 || retention.Blocked > 0 {
@@ -337,7 +339,7 @@ func (m *Model) handle(input string) {
 		switch fields[0] {
 		case "/help":
 			m.add("Setup: /connect [search TEXT|provider [base-url]]; /models [search TEXT|id|refresh|probe]; /price IN OUT")
-			m.add("Scope: /target URL; /scope; /attach DIR; /artifact FILE; /skills")
+			m.add("Scope: /target URL; /scope; /rules FILE APPROVAL; /rules clear; /attach DIR; /artifact FILE; /skills")
 			m.add("Views: /board; /trace; /memory; /findings; /budget; /agents [run-id]; /dashboard")
 			m.add("Control: /pause; /stop; /recover ID; /review ID ROLE OUTCOME; /resume ID original-task; /quit")
 			m.add("Keys: Tab next view; Ctrl+R refresh; Esc log; Ctrl+P pause. Resume requires outcome review.")
@@ -375,6 +377,24 @@ func (m *Model) handle(input string) {
 			if api == "" {
 				m.add("This provider has no catalog API URL. Use /connect " + id + " <https-base-url>.")
 				return
+			}
+			if id == m.cfg.Route.Provider {
+				if key, err := config.Key(id); err == nil && key != "" {
+					previous := m.cfg.Route
+					m.cfg.Route = config.Route{Provider: id, BaseURL: api, Protocol: "openai-chat"}
+					if previous.BaseURL == api {
+						m.cfg.Route.Model = previous.Model
+					}
+					if err := config.Save(m.cfg); err != nil {
+						m.cfg.Route = previous
+						m.add("Config save failed: " + err.Error())
+						return
+					}
+					m.endpointModels = nil
+					m.verifiedToolRoute = config.Route{}
+					m.add("Connected " + id + " with its existing OS-keyring credential. Use /models refresh to verify the endpoint model.")
+					return
+				}
 			}
 			m.pendingID, m.pendingAPI, m.secret = id, api, true
 			m.endpointModels = nil
@@ -491,6 +511,10 @@ func (m *Model) handle(input string) {
 			m.manualPriceRoute, m.manualInputPrice, m.manualOutputPrice = m.cfg.Route, in, out
 			m.add("Model prices set for this session. Confirm them with the provider before running a paid model.")
 		case "/target":
+			if m.running {
+				m.add("Pause the active run before changing its target.")
+				return
+			}
 			if len(fields) < 2 {
 				m.add("Usage: /target https://example.com")
 				return
@@ -500,8 +524,75 @@ func (m *Model) handle(input string) {
 				m.add(err.Error())
 			} else {
 				m.target = fields[1]
+				if m.approvedReads != nil && m.approvedReads.Origin() != scope.Origin {
+					m.approvedReads = nil
+					m.add("Approved read plan cleared for the new origin.")
+				}
 				m.add("Target: " + m.target + " | exact origin: " + scope.Origin)
 			}
+		case "/rules":
+			if len(fields) == 2 && fields[1] == "clear" {
+				if m.running {
+					m.add("Pause the active run before clearing its approved read plan.")
+					return
+				}
+				m.approvedReads = nil
+				m.add("Approved read plan cleared.")
+				return
+			}
+			if len(fields) != 3 || m.target == "" || m.running {
+				m.add("Usage: set /target ORIGIN, then /rules RULES.json APPROVAL.json when no run is active.")
+				return
+			}
+			scope, err := policy.FromTarget(m.target)
+			if err != nil {
+				m.add(err.Error())
+				return
+			}
+			rulesFile, err := os.Open(fields[1])
+			if err != nil {
+				m.add("Rules unavailable: " + err.Error())
+				return
+			}
+			rules, parseErr := policy.ParseTrustedRules(rulesFile, scope.Origin)
+			_ = rulesFile.Close()
+			if parseErr != nil {
+				m.add("Rules rejected: " + parseErr.Error())
+				return
+			}
+			for _, action := range rules.Actions {
+				if action.Method != "GET" || action.Effect != policy.EffectRead {
+					m.add("Agent rules accept only exact GET/read actions.")
+					return
+				}
+			}
+			approvalFile, err := os.Open(fields[2])
+			if err != nil {
+				m.add("Approval unavailable: " + err.Error())
+				return
+			}
+			approval, parseErr := policy.ParseRuleApproval(approvalFile)
+			_ = approvalFile.Close()
+			if parseErr != nil {
+				m.add("Approval rejected: " + parseErr.Error())
+				return
+			}
+			key, err := config.PolicyApprovalKey(false)
+			if err != nil {
+				m.add("Approval key unavailable: " + err.Error())
+				return
+			}
+			verified, err := policy.VerifyApprovedRules(rules, approval, key, time.Now())
+			if err != nil {
+				m.add("Approval rejected: " + err.Error())
+				return
+			}
+			m.approvedReads = &verified
+			ids := make([]string, 0, len(rules.Actions))
+			for _, action := range rules.Actions {
+				ids = append(ids, broker.ReadActionID(action))
+			}
+			m.add(fmt.Sprintf("Approved %d exact GET/read actions for %s until %s. Action IDs: %s", len(ids), verified.Origin(), verified.ExpiresAt().Format(time.RFC3339), strings.Join(ids, ", ")))
 		case "/scope":
 			if m.target == "" {
 				m.add("No target set.")
@@ -696,14 +787,22 @@ func (m *Model) handle(input string) {
 	}
 	m.target = target
 	m.add("You: " + input)
-	m.add("Starting four bounded agent roles within " + scope.Origin + ". Network tools are disabled in this development build.")
+	if m.approvedReads != nil && m.approvedReads.Origin() != scope.Origin {
+		m.add("Approved read plan differs from the selected target origin. Use /rules clear or load a matching approval.")
+		return
+	}
+	if m.approvedReads != nil {
+		m.add("Starting four bounded agent roles with approved exact GET/read actions for surface discovery.")
+	} else {
+		m.add("Starting four bounded agent roles within " + scope.Origin + ". Network tools are disabled.")
+	}
 	ctx, cancel := context.WithCancel(context.Background())
 	m.cancel, m.running = cancel, true
-	route, workspace, st, sb := m.cfg.Route, m.workspace, m.store, m.sandbox
+	route, workspace, st, sb, approved := m.cfg.Route, m.workspace, m.store, m.sandbox, m.approvedReads
 	done := make(chan struct{})
 	m.runDone = done
 	go func() {
-		s := orchestrator.Scheduler{Route: route, Key: key, Workspace: workspace, Store: st, Sandbox: sb, Budget: budget,
+		s := orchestrator.Scheduler{Route: route, Key: key, Workspace: workspace, Store: st, Sandbox: sb, Budget: budget, ApprovedReads: approved,
 			Notify: func(e agent.Event) { m.send(eventMsg(e)) }}
 		id, err := s.Start(ctx, input, target)
 		close(done)
@@ -734,11 +833,11 @@ func (m *Model) agentBudget() (agent.Budget, error) {
 func (m *Model) startAgentResume(runID, prompt, key string, budget agent.Budget) {
 	ctx, cancel := context.WithCancel(context.Background())
 	m.cancel, m.running = cancel, true
-	route, workspace, st, sb := m.cfg.Route, m.workspace, m.store, m.sandbox
+	route, workspace, st, sb, approved := m.cfg.Route, m.workspace, m.store, m.sandbox, m.approvedReads
 	done := make(chan struct{})
 	m.runDone = done
 	go func() {
-		s := orchestrator.Scheduler{Route: route, Key: key, Workspace: workspace, Store: st, Sandbox: sb, Budget: budget, Notify: func(e agent.Event) { m.send(eventMsg(e)) }}
+		s := orchestrator.Scheduler{Route: route, Key: key, Workspace: workspace, Store: st, Sandbox: sb, Budget: budget, ApprovedReads: approved, Notify: func(e agent.Event) { m.send(eventMsg(e)) }}
 		err := s.RunPending(ctx, runID, prompt)
 		close(done)
 		m.send(doneMsg{runID, err})

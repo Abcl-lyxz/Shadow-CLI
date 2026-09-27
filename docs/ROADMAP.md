@@ -1,6 +1,6 @@
 # Shadow production roadmap
 
-Updated: 2026-09-26. This is the work checklist. `CURRENT_STATUS.md` holds the
+Updated: 2026-09-27. This is the work checklist. `CURRENT_STATUS.md` holds the
 commands, results, and limitations behind the checks; `PRODUCT_SPEC.md` defines
 the intended product. Continue in the current conversation. The number of chat
 turns and context size do not define a phase boundary.
@@ -21,13 +21,12 @@ TUI capability/cache logic on Windows, macOS, and Linux and passes Docker
 isolation on Linux. Native interactive TUI/keyring drills and real-provider
 routing remain Phase 8 release evidence, not production claims.
 The next unchecked item is production gateway mediation for every target-capable
-tool, with explicit target authorization and no egress bypass. The broker now
-has typed run-bound loopback actions and a locally approved read-only API. A
-manual CLI can execute one approved public read and retain encrypted evidence;
-the agent/TUI still cannot access public targets. The working tree has
-uncommitted changes; CI has not run on those changes. One authorized public
-homepage read has encrypted evidence; the full controlled-target suite and
-release review remain open.
+tool, including target-specific authentication and reversible writes. The broker
+has typed run-bound loopback actions and a locally approved read-only API. The
+TUI can load a signed exact GET/read plan and expose only action IDs to its
+surface agent; the default run has no network grant. This path has local policy
+tests but no public-target agent drill. One earlier authorized homepage read has
+encrypted evidence. The controlled-target suite and release review remain open.
 
 - [x] **Phase 0 — Local development foundation**
   - [x] Go CLI and TUI development shell, provider/model catalog, OS-keyring
@@ -107,7 +106,9 @@ release review remain open.
   - [ ] Integrate reviewed detail and safely redacted evidence excerpts into
     the finding UI, validate safe PoC explanations
     and full reports on an authorized controlled target, and support Unicode
-    narrative in PDF without exposing sensitive target data.
+    narrative in PDF without exposing sensitive target data. A local JSON report
+    import and embedded Thai/Latin PDF font now cover the development path;
+    controlled-target review and broader font coverage remain open.
 
 - [x] **Phase 7 — Product workflows**
   - [x] Basic `/connect`, provider/model selection, target/attachment commands,
@@ -120,7 +121,7 @@ release review remain open.
     provenance-checked plugin API.
 
 - [ ] **Phase 8 — Release evidence and packaging**
-  - [x] Historical CI passed on the earlier review-branch commit; local
+  - [x] Historical CI passed on commit `c407157`; local
     Windows tests and cross-builds passed for the current development slices.
     This does not cover the current working tree in CI.
   - [ ] Pin the image and packages; review its SBOM, licenses, vulnerabilities,

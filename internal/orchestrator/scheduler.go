@@ -1,4 +1,4 @@
-// Package orchestrator coordinates bounded, no-network-grant agent jobs.
+// Package orchestrator coordinates bounded agent jobs and immutable run grants.
 package orchestrator
 
 import (
@@ -11,8 +11,10 @@ import (
 	"net/url"
 	"strings"
 	"sync"
+	"time"
 
 	"shadow/internal/agent"
+	"shadow/internal/broker"
 	"shadow/internal/config"
 	"shadow/internal/policy"
 	"shadow/internal/sandbox"
@@ -22,27 +24,28 @@ import (
 var roles = []string{"surface", "source", "verify", "report"}
 
 var roleTask = map[string]string{
-	"surface": "Map the authorized origin from available local evidence only. Record observations and uncertainty; do not make a network request.",
+	"surface": "Map the authorized origin from available evidence. Use only explicitly granted read action IDs when offered; record observations and uncertainty.",
 	"source":  "Review the attached source or local artifacts if present. Use only the network-disabled sandbox. Record evidence references and uncertainty.",
 	"verify":  "Assess prior observations. A reproduced HTTP response is only a response observation, not a verified vulnerability. Identify safe validation steps and unresolved hypotheses.",
 	"report":  "Summarize supported observations, hypotheses, and limitations. Cite event IDs. Do not claim a security finding was verified without target evidence.",
 }
 
 var roleTools = map[string]map[string]bool{
-	"surface": {"read_event": true, "load_skill": true, "remember_observation": true},
+	"surface": {"read_event": true, "load_skill": true, "remember_observation": true, "approved_http_read": true},
 	"source":  {"sandbox_command": true, "read_event": true, "load_skill": true, "remember_observation": true},
 	"verify":  {"sandbox_command": true, "read_event": true, "load_skill": true, "remember_observation": true},
 	"report":  {"read_event": true, "load_skill": true},
 }
 
 type Scheduler struct {
-	Store     *store.Store
-	Route     config.Route
-	Key       string
-	Workspace string
-	Sandbox   *sandbox.Runner
-	Budget    agent.Budget
-	Notify    func(agent.Event)
+	Store         *store.Store
+	Route         config.Route
+	Key           string
+	Workspace     string
+	Sandbox       *sandbox.Runner
+	Budget        agent.Budget
+	Notify        func(agent.Event)
+	ApprovedReads *policy.VerifiedRules // optional locally signed exact GET/read grant
 }
 
 func (s *Scheduler) Start(ctx context.Context, prompt, target string) (string, error) {
@@ -68,7 +71,22 @@ func (s *Scheduler) Start(ctx context.Context, prompt, target string) (string, e
 		return "", err
 	}
 	runID := hex.EncodeToString(id[:])
-	if err := s.Store.StartRun(ctx, runID, scope, nil); err != nil {
+	if s.ApprovedReads != nil {
+		if !s.Store.EvidenceKeyReady() {
+			return "", errors.New("approved agent reads require an evidence key")
+		}
+		if s.ApprovedReads.Origin() != scope.Origin || len(s.ApprovedReads.Actions()) == 0 {
+			return "", errors.New("approved read origin or actions differ from target")
+		}
+		for _, action := range s.ApprovedReads.Actions() {
+			if action.Method != "GET" || action.Effect != policy.EffectRead {
+				return "", errors.New("agent approval permits only exact GET/read actions")
+			}
+		}
+		if err := s.Store.StartApprovedRun(ctx, runID, *s.ApprovedReads); err != nil {
+			return "", err
+		}
+	} else if err := s.Store.StartRun(ctx, runID, scope, nil); err != nil {
 		return "", err
 	}
 	route, err := json.Marshal(s.Route)
@@ -120,8 +138,36 @@ func (s *Scheduler) RunPending(ctx context.Context, runID, prompt string) error 
 		return errors.New("provider key required")
 	}
 	snapshot, err := s.Store.RunSnapshot(ctx, runID)
-	if err != nil || len(snapshot.Actions) != 0 {
+	if err != nil {
+		return errors.New("orchestration run snapshot unavailable")
+	}
+	if s.ApprovedReads == nil && len(snapshot.Actions) != 0 {
 		return errors.New("orchestration run has unexpected network grants")
+	}
+	if s.ApprovedReads != nil {
+		if !s.Store.EvidenceKeyReady() || !time.Now().Before(s.ApprovedReads.ExpiresAt()) {
+			return errors.New("approved agent read key or approval is unavailable")
+		}
+		if snapshot.Origin != s.ApprovedReads.Origin() || len(snapshot.Actions) != len(s.ApprovedReads.Actions()) {
+			return errors.New("orchestration approval differs from run snapshot")
+		}
+		for _, action := range s.ApprovedReads.Actions() {
+			if action.Method != "GET" || action.Effect != policy.EffectRead || !snapshot.AllowsAction(action) {
+				return errors.New("orchestration action differs from run approval")
+			}
+		}
+		if id, digest, expires, err := s.Store.RunRuleApproval(ctx, runID); err != nil || id != s.ApprovedReads.ApprovalID() || digest != s.ApprovedReads.RulesSHA256() || !expires.Equal(s.ApprovedReads.ExpiresAt()) {
+			return errors.New("orchestration run approval unavailable or changed")
+		}
+	}
+	// Build the gateway before claiming any jobs. A blocked destination or
+	// unavailable approval must not start an unrelated provider request.
+	var approved *broker.ApprovedReadNetwork
+	if s.ApprovedReads != nil {
+		approved, err = broker.NewApprovedReadNetwork(ctx, s.Store, runID, *s.ApprovedReads)
+		if err != nil {
+			return err
+		}
 	}
 	// Independent discovery jobs can run together. Later jobs require both
 	// discovery jobs and then verification to have completed successfully.
@@ -153,7 +199,10 @@ func (s *Scheduler) RunPending(ctx context.Context, runID, prompt string) error 
 				return fmt.Errorf("agent %s requires outcome review (%s)", role, states[role])
 			}
 			wg.Add(1)
-			go func(role string) { defer wg.Done(); errs <- s.runJob(ctx, runID, role, prompt, snapshot.Origin) }(role)
+			go func(role string) {
+				defer wg.Done()
+				errs <- s.runJob(ctx, runID, role, prompt, snapshot.Origin, approved)
+			}(role)
 		}
 		wg.Wait()
 		close(errs)
@@ -166,7 +215,7 @@ func (s *Scheduler) RunPending(ctx context.Context, runID, prompt string) error 
 	return nil
 }
 
-func (s *Scheduler) runJob(ctx context.Context, runID, role, prompt, origin string) error {
+func (s *Scheduler) runJob(ctx context.Context, runID, role, prompt, origin string, approved *broker.ApprovedReadNetwork) error {
 	plan, err := s.Store.AgentPlan(ctx, runID)
 	if err != nil {
 		return err
@@ -187,8 +236,12 @@ func (s *Scheduler) runJob(ctx context.Context, runID, role, prompt, origin stri
 		return err
 	}
 	last := initial
+	if role != "surface" {
+		approved = nil
+	}
 	r := agent.Runner{RunID: runID, Role: role, Route: s.Route, Key: s.Key, Workspace: s.Workspace, Store: s.Store, Sandbox: s.Sandbox, Notify: s.Notify, Budget: &s.Budget, AllowedTools: roleTools[role],
-		Initial: initial,
+		ApprovedReads: approved,
+		Initial:       initial,
 		Checkpoint: func(ctx context.Context, c agent.Checkpoint) error {
 			last = c
 			return s.Store.AgentJobTransition(ctx, runID, role, "running", "running", c.Phase, c.Step, c.InputTokens, c.OutputTokens, c.CostMicroUSD, c.ToolCalls)

@@ -73,6 +73,8 @@ vulnerability:
     "expected": "The fixture returns the documented response.",
     "preconditions": "The disposable fixture is running.",
     "impact": "No security impact has been demonstrated.",
+    "evidence_excerpt": "Operator-reviewed response summary; no raw identifier or token included.",
+    "poc_explanation": "No PoC was attempted under this review.",
     "validation_plan": "Review the saved observation and request approval before any further test.",
     "remediation": "No remediation is proposed from this observation alone.",
     "business_priority": "unassigned"
@@ -94,10 +96,15 @@ go run ./cmd/shadow report export RUN --format html --confirm DIGEST --out new-r
 The preview prints the complete reviewed document and its digest. The detail
 file is capped at 64 KiB and 50 findings. Known secret and email patterns,
 control characters, unknown fields, incomplete details, and missing CVSS
-rationale are refused. This cannot recognize every secret or personal datum;
-the operator must inspect the preview before export. HTML escapes narrative
-text and applies a restrictive content policy. PDF supports ASCII narrative
-only and fails instead of replacing Unicode text; use HTML, JSON, or SARIF for
-Unicode. The file remains on the operator's machine and is not placed in the
-active database. No report format claims a verified vulnerability from a
+rationale are refused. Optional evidence excerpts and PoC explanations are
+operator-authored, pass the same text filter, and join the digest review; raw
+response text is never inserted automatically. This cannot recognize every
+secret or personal datum; the operator must inspect the preview before export.
+HTML escapes narrative text and applies a restrictive content policy. PDF
+embeds an OFL-licensed Noto Sans Thai font for Latin and Thai text and refuses
+unsupported glyphs instead of replacing them. The file remains on the
+operator's machine and is not placed in the active database. The dashboard
+can open a digest-approved JSON export locally to show matching reviewed detail;
+the file stays in the browser tab and is matched against run, finding, source,
+and review event IDs. No report format claims a verified vulnerability from a
 response observation or an operator's prose alone.

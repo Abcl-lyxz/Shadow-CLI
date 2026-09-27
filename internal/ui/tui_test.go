@@ -22,8 +22,83 @@ import (
 	_ "modernc.org/sqlite"
 	"shadow/internal/catalog"
 	"shadow/internal/config"
+	"shadow/internal/policy"
 	"shadow/internal/store"
 )
+
+func TestRulesCommandRequiresSignedExactReadPlanForSelectedOrigin(t *testing.T) {
+	keyring.MockInit()
+	key, err := config.PolicyApprovalKey(true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	origin := "https://example.com"
+	rules := policy.TrustedRules{Version: 1, Origin: origin, Actions: []policy.ActionRule{{URL: origin + "/", Method: "GET", Effect: policy.EffectRead}}}
+	approval, err := policy.SignRuleApproval(rules, key, time.Now())
+	if err != nil {
+		t.Fatal(err)
+	}
+	dir := t.TempDir()
+	rulesPath, approvalPath := filepath.Join(dir, "rules.json"), filepath.Join(dir, "approval.json")
+	write := func(path string, value any) {
+		t.Helper()
+		encoded, err := json.Marshal(value)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(path, encoded, 0600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	write(rulesPath, rules)
+	write(approvalPath, approval)
+	m := &Model{target: origin}
+	m.handle("/rules " + rulesPath + " " + approvalPath)
+	if m.approvedReads == nil || m.approvedReads.Origin() != origin {
+		t.Fatalf("signed read plan not loaded: %v", m.lines)
+	}
+	m.running = true
+	m.handle("/target https://other.example")
+	m.handle("/rules clear")
+	if m.target != origin || m.approvedReads == nil {
+		t.Fatal("active run allowed target or approval change")
+	}
+	m.running = false
+	m.handle("/target https://other.example")
+	if m.approvedReads != nil {
+		t.Fatal("approval survived origin change")
+	}
+	m.handle("/target " + origin)
+	rules.Actions[0].URL = origin + "/changed"
+	write(rulesPath, rules)
+	m.handle("/rules " + rulesPath + " " + approvalPath)
+	if m.approvedReads != nil {
+		t.Fatal("changed rule document accepted under old signature")
+	}
+	rules.Actions[0].URL = origin + "/"
+	rules.Actions[0].Effect = policy.EffectBlocked
+	write(rulesPath, rules)
+	m.handle("/rules " + rulesPath + " " + approvalPath)
+	if m.approvedReads != nil {
+		t.Fatal("non-read plan accepted")
+	}
+}
+
+func TestConnectReusesExistingProviderCredentialWithoutPrompting(t *testing.T) {
+	keyring.MockInit()
+	t.Setenv("APPDATA", t.TempDir())
+	if err := config.SetKey("custom-provider", "fixture-secret"); err != nil {
+		t.Fatal(err)
+	}
+	m := &Model{cfg: config.Config{Version: 1, Route: config.Route{Provider: "custom-provider", Model: "old-model", BaseURL: "https://old.example/v1", Protocol: "openai-chat"}}}
+	m.handle("/connect custom-provider https://new.example/v1")
+	if m.secret || m.cfg.Route.BaseURL != "https://new.example/v1" || m.cfg.Route.Model != "" {
+		t.Fatalf("existing credential was not reused safely: %+v", m.cfg.Route)
+	}
+	if got, err := config.Key("custom-provider"); err != nil || got != "fixture-secret" {
+		t.Fatalf("stored credential changed: %v", err)
+	}
+}
 
 func TestAgentBudgetRequiresKnownModelPrice(t *testing.T) {
 	m := &Model{cfg: config.Config{Route: config.Route{Provider: "fixture", Model: "priced"}}}

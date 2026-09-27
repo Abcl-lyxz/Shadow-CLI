@@ -67,7 +67,7 @@ func TestReviewedMetadataExportsAndEvidenceGate(t *testing.T) {
 				t.Fatalf("%s leaked %q", format, secret)
 			}
 		}
-		if format == "pdf" && (!bytes.HasPrefix(out, []byte("%PDF-1.4")) || !bytes.Contains(out, []byte("startxref"))) {
+		if format == "pdf" && (!bytes.HasPrefix(out, []byte("%PDF-")) || !bytes.Contains(out, []byte("startxref"))) {
 			t.Fatal("malformed PDF skeleton")
 		}
 		if format == "sarif" {
@@ -160,7 +160,7 @@ func TestOperatorNarrativeRequiresCompleteRationaleAndSafeText(t *testing.T) {
 		key, _, _ := strings.Cut(part, ":")
 		rationale[key] = "Operator explained metric"
 	}
-	d := Detail{FindingID: 1, Title: "<script>alert(1)</script> Access check", AssetLabel: "fixture application", CWE: "CWE-284", Observed: "A response was saved", Expected: "Access is restricted", Preconditions: "Signed in as a test user", Impact: "Impact has not been demonstrated", ValidationPlan: "Ask owner for a disposable fixture", Remediation: "Review access control", CVSSRationale: rationale, BusinessPriority: "unassigned"}
+	d := Detail{FindingID: 1, Title: "<script>alert(1)</script> Access check", AssetLabel: "fixture application", CWE: "CWE-284", Observed: "A response was saved", Expected: "Access is restricted", Preconditions: "Signed in as a test user", Impact: "Impact has not been demonstrated", EvidenceExcerpt: "Reviewed status 200 with no sensitive body text", PoCExplanation: "No PoC was attempted", ValidationPlan: "Ask owner for a disposable fixture", Remediation: "Review access control", CVSSRationale: rationale, BusinessPriority: "unassigned"}
 	input, _ := json.Marshal([]Detail{d})
 	parsed, err := ParseDetails(input)
 	if err != nil {
@@ -178,7 +178,7 @@ func TestOperatorNarrativeRequiresCompleteRationaleAndSafeText(t *testing.T) {
 		if format == "html" && (bytes.Contains(out, []byte("<script>")) || !bytes.Contains(out, []byte("&lt;script&gt;"))) {
 			t.Fatal("HTML did not escape operator text")
 		}
-		if !bytes.Contains(out, []byte("Access check")) {
+		if format != "pdf" && !bytes.Contains(out, []byte("Access check")) {
 			t.Fatalf("%s omitted reviewed narrative", format)
 		}
 	}
@@ -195,12 +195,25 @@ func TestOperatorNarrativeRequiresCompleteRationaleAndSafeText(t *testing.T) {
 		t.Fatal("unknown detail key accepted")
 	}
 	d.Observed = "A response was saved"
+	d.EvidenceExcerpt = "private@example.com"
+	if _, _, err := AttachDetails(doc, []Detail{d}); err == nil {
+		t.Fatal("sensitive evidence excerpt accepted")
+	}
+	d.EvidenceExcerpt = "Reviewed status 200 with no sensitive body text"
 	d.Title = "ชื่อภาษาไทย"
 	unicodeDoc, _, err := AttachDetails(doc, []Detail{d})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := Render(unicodeDoc, "pdf"); err == nil {
-		t.Fatal("Unicode silently degraded in PDF")
+	if out, err := Render(unicodeDoc, "pdf"); err != nil || !bytes.HasPrefix(out, []byte("%PDF")) {
+		t.Fatalf("Thai PDF: %v", err)
+	}
+	d.Title = "Unsupported emoji 🚀"
+	unsupported, _, err := AttachDetails(doc, []Detail{d})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := Render(unsupported, "pdf"); err == nil {
+		t.Fatal("missing glyph silently degraded in PDF")
 	}
 }

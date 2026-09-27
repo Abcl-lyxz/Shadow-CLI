@@ -9,6 +9,8 @@ import (
 	"errors"
 	"fmt"
 	"time"
+
+	"shadow/internal/policy"
 )
 
 // AgentJob contains only operational metadata. Instructions, provider replies,
@@ -91,7 +93,35 @@ func (s *Store) CreateAgentPlan(ctx context.Context, runID, promptSHA256 string,
 		return err
 	}
 	if string(actions) != "[]" {
-		return errors.New("agent plan requires a run with no network grants")
+		var grants []ActionGrant
+		if err := json.Unmarshal(actions, &grants); err != nil || len(grants) == 0 || len(grants) > 20 || !seen["surface"] {
+			return errors.New("approved agent plan requires bounded read grants and a surface role")
+		}
+		for _, grant := range grants {
+			if grant.Method != "GET" || grant.Effect != policy.EffectRead || grant.Resource != "" || grant.CleanupMethod != "" || grant.CleanupURLSHA256 != "" {
+				return errors.New("agent plan cannot contain target mutations")
+			}
+		}
+		var approvalID, digest, expiry string
+		if err := tx.QueryRowContext(ctx, "SELECT approval_id,rules_sha256,expires_at FROM run_rule_approvals WHERE run_id=?", runID).Scan(&approvalID, &digest, &expiry); err != nil || approvalID == "" || digest == "" {
+			return errors.New("approved agent plan requires an immutable run approval")
+		}
+		expiresAt, err := time.Parse(time.RFC3339, expiry)
+		if err != nil || !time.Now().Before(expiresAt) {
+			return errors.New("approved agent plan requires an unexpired approval")
+		}
+		var start []byte
+		if err := tx.QueryRowContext(ctx, "SELECT payload FROM events WHERE run_id=? AND kind='started' ORDER BY id LIMIT 1", runID).Scan(&start); err != nil {
+			return err
+		}
+		var recorded struct {
+			ApprovalID string `json:"rule_approval_id"`
+			Digest     string `json:"rules_sha256"`
+			Expiry     string `json:"rule_approval_expires_at"`
+		}
+		if err := json.Unmarshal(start, &recorded); err != nil || recorded.ApprovalID != approvalID || recorded.Digest != digest || recorded.Expiry != expiry {
+			return errors.New("approved agent plan differs from its run start")
+		}
 	}
 	now := time.Now().UTC().Format(time.RFC3339Nano)
 	if _, err := tx.ExecContext(ctx, "INSERT INTO agent_plans(run_id,prompt_sha256,route,budget,created_at) VALUES(?,?,?,?,?)", runID, promptSHA256, route, budget, now); err != nil {

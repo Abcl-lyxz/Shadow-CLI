@@ -14,8 +14,8 @@ import (
 )
 
 // ApprovedReadNetwork is the typed, read-only gateway for locally approved
-// rules. It is not exposed to the shipped agent or UI. Authentication and
-// mutations require separate host-owned contracts and remain unavailable.
+// rules. Authentication and mutations require separate host-owned contracts
+// and remain unavailable.
 type ApprovedReadNetwork struct {
 	store    *store.Store
 	snapshot store.RunSnapshot
@@ -135,6 +135,13 @@ func (n *ApprovedReadNetwork) ReadActionIDs() []string {
 	}
 	sort.Strings(ids)
 	return ids
+}
+
+func (n *ApprovedReadNetwork) RunID() string {
+	if n == nil {
+		return ""
+	}
+	return n.snapshot.RunID
 }
 
 func (n *ApprovedReadNetwork) ReadRecorded(ctx context.Context, actionID string) (Observation, int64, error) {

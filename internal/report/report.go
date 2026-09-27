@@ -30,6 +30,8 @@ type Detail struct {
 	Expected         string            `json:"expected"`
 	Preconditions    string            `json:"preconditions"`
 	Impact           string            `json:"impact"`
+	EvidenceExcerpt  string            `json:"evidence_excerpt,omitempty"`
+	PoCExplanation   string            `json:"poc_explanation,omitempty"`
 	ValidationPlan   string            `json:"validation_plan"`
 	Remediation      string            `json:"remediation"`
 	CVSSRationale    map[string]string `json:"cvss_rationale,omitempty"`
@@ -94,6 +96,11 @@ func AttachDetails(doc Document, details []Detail) (Document, string, error) {
 		for _, field := range fields {
 			if !safeReviewText(field, 1200) {
 				return doc, "", errors.New("review detail is empty, too long, or contains sensitive text")
+			}
+		}
+		for _, field := range []string{d.EvidenceExcerpt, d.PoCExplanation} {
+			if field != "" && !safeReviewText(field, 1200) {
+				return doc, "", errors.New("review excerpt or PoC explanation contains sensitive text")
 			}
 		}
 		if len(d.Title) > 160 || len(d.AssetLabel) > 160 {
@@ -256,106 +263,4 @@ func Render(doc Document, format string) ([]byte, error) {
 	}
 }
 
-const htmlReportTemplate = `<!doctype html><html lang="en"><meta charset="utf-8"><meta name="viewport" content="width=device-width"><meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'unsafe-inline'"><title>Shadow reviewed findings</title><style>body{font:16px system-ui;max-width:760px;margin:3rem auto;padding:0 1rem;color:#17202a}article{border-top:1px solid #bbb;padding:1rem 0}small{color:#555}dt{font-weight:600;margin-top:.7rem}dd{margin:0;white-space:pre-wrap}</style><h1>Reviewed findings</h1><p>Run {{.RunID}}</p><p>{{.Notice}}</p>{{range .Findings}}<article><h2>{{if .Detail}}{{.Detail.Title}}{{else}}Finding {{.ID}}{{end}}</h2><p>{{.ClaimType}} · {{.Status}} · PoC: {{.PoCStatus}} · confidence: {{.Confidence}}</p><small>Source event {{.SourceEventID}} · repeat event {{.ReproductionEventID}} · review event {{.ReviewEventID}} · duplicate of {{.DuplicateOf}}</small>{{if .CVSSVector}}<p>Provisional CVSS v4: {{.CVSSVector}} ({{.CVSSScore}})</p>{{end}}{{with .Detail}}<dl><dt>Asset</dt><dd>{{.AssetLabel}}</dd><dt>CWE</dt><dd>{{.CWE}}</dd><dt>Observed</dt><dd>{{.Observed}}</dd><dt>Expected</dt><dd>{{.Expected}}</dd><dt>Preconditions</dt><dd>{{.Preconditions}}</dd><dt>Impact assessment</dt><dd>{{.Impact}}</dd><dt>Operator validation plan</dt><dd>{{.ValidationPlan}}</dd><dt>Remediation</dt><dd>{{.Remediation}}</dd><dt>Business priority</dt><dd>{{.BusinessPriority}}</dd>{{if .CVSSRationale}}<dt>CVSS metric rationale</dt>{{range $metric,$why := .CVSSRationale}}<dd>{{$metric}}: {{$why}}</dd>{{end}}{{end}}</dl>{{end}}</article>{{end}}</html>`
-
-// The small PDF renderer supports ASCII review text only. Returning an error
-// for Unicode avoids silently replacing important detail with placeholders.
-func renderPDF(doc Document) ([]byte, error) {
-	lines := []string{"Shadow reviewed findings", "Run: " + doc.RunID, "Development metadata; vulnerability impact not verified."}
-	for _, e := range doc.Findings {
-		lines = append(lines, fmt.Sprintf("Finding %d: %s / %s", e.ID, e.ClaimType, e.Status), fmt.Sprintf("  PoC %s; confidence %s; duplicate %d", e.PoCStatus, e.Confidence, e.DuplicateOf), fmt.Sprintf("  Evidence %d / %d; review %d", e.SourceEventID, e.ReproductionEventID, e.ReviewEventID))
-		if e.CVSSVector != "" {
-			lines = append(lines, fmt.Sprintf("  Provisional CVSS v4 %.1f: %s", *e.CVSSScore, e.CVSSVector))
-		}
-		if d := e.Detail; d != nil {
-			for _, field := range []struct{ label, value string }{{"Title", d.Title}, {"Asset", d.AssetLabel}, {"CWE", d.CWE}, {"Observed", d.Observed}, {"Expected", d.Expected}, {"Preconditions", d.Preconditions}, {"Impact", d.Impact}, {"Operator validation plan", d.ValidationPlan}, {"Remediation", d.Remediation}, {"Business priority", d.BusinessPriority}} {
-				if !ascii(field.value) {
-					return nil, errors.New("PDF detail contains Unicode; use HTML or JSON")
-				}
-				lines = append(lines, wrapPDF(field.label+": "+field.value)...)
-			}
-			for _, part := range strings.Split(strings.TrimPrefix(e.CVSSVector, "CVSS:4.0/"), "/") {
-				metric, _, _ := strings.Cut(part, ":")
-				if rationale := d.CVSSRationale[metric]; rationale != "" {
-					if !ascii(rationale) {
-						return nil, errors.New("PDF rationale contains Unicode; use HTML or JSON")
-					}
-					lines = append(lines, wrapPDF("CVSS "+metric+": "+rationale)...)
-				}
-			}
-		}
-	}
-	var objects []string
-	objects = append(objects, "<< /Type /Catalog /Pages 2 0 R >>")
-	pages := (len(lines) + 43) / 44
-	pageRefs := make([]string, pages)
-	for i := range pageRefs {
-		pageRefs[i] = fmt.Sprintf("%d 0 R", 4+i*2)
-	}
-	objects = append(objects, fmt.Sprintf("<< /Type /Pages /Kids [%s] /Count %d >>", strings.Join(pageRefs, " "), pages))
-	objects = append(objects, "<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>")
-	for page := 0; page < pages; page++ {
-		pageID := 4 + page*2
-		objects = append(objects, fmt.Sprintf("<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Resources << /Font << /F1 3 0 R >> >> /Contents %d 0 R >>", pageID+1))
-		var stream strings.Builder
-		stream.WriteString("BT /F1 10 Tf 42 750 Td 14 TL\n")
-		for _, line := range lines[page*44 : min((page+1)*44, len(lines))] {
-			stream.WriteString("(" + pdfEscape(line) + ") Tj T*\n")
-		}
-		stream.WriteString("ET\n")
-		body := stream.String()
-		objects = append(objects, fmt.Sprintf("<< /Length %d >>\nstream\n%sendstream", len(body), body))
-	}
-	var out bytes.Buffer
-	out.WriteString("%PDF-1.4\n")
-	offsets := []int{0}
-	for i, obj := range objects {
-		offsets = append(offsets, out.Len())
-		fmt.Fprintf(&out, "%d 0 obj\n%s\nendobj\n", i+1, obj)
-	}
-	xref := out.Len()
-	fmt.Fprintf(&out, "xref\n0 %d\n0000000000 65535 f \n", len(offsets))
-	for _, offset := range offsets[1:] {
-		fmt.Fprintf(&out, "%010d 00000 n \n", offset)
-	}
-	fmt.Fprintf(&out, "trailer\n<< /Size %d /Root 1 0 R >>\nstartxref\n%d\n%%%%EOF\n", len(offsets), xref)
-	return out.Bytes(), nil
-}
-
-func ascii(s string) bool {
-	for _, r := range s {
-		if r < 32 || r > 126 {
-			return false
-		}
-	}
-	return true
-}
-
-func wrapPDF(s string) []string {
-	const width = 88
-	var lines []string
-	for len(s) > width {
-		cut := strings.LastIndexByte(s[:width+1], ' ')
-		if cut < 20 {
-			cut = width
-		}
-		lines = append(lines, s[:cut])
-		s = strings.TrimLeft(s[cut:], " ")
-	}
-	return append(lines, s)
-}
-
-func pdfEscape(s string) string {
-	var b strings.Builder
-	for _, r := range s {
-		if r < 32 || r > 126 {
-			b.WriteByte('?')
-		} else if r == '(' || r == ')' || r == '\\' {
-			b.WriteByte('\\')
-			b.WriteRune(r)
-		} else {
-			b.WriteRune(r)
-		}
-	}
-	return b.String()
-}
+const htmlReportTemplate = `<!doctype html><html lang="en"><meta charset="utf-8"><meta name="viewport" content="width=device-width"><meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'unsafe-inline'"><title>Shadow reviewed findings</title><style>body{font:16px system-ui;max-width:760px;margin:3rem auto;padding:0 1rem;color:#17202a}article{border-top:1px solid #bbb;padding:1rem 0}small{color:#555}dt{font-weight:600;margin-top:.7rem}dd{margin:0;white-space:pre-wrap}</style><h1>Reviewed findings</h1><p>Run {{.RunID}}</p><p>{{.Notice}}</p>{{range .Findings}}<article><h2>{{if .Detail}}{{.Detail.Title}}{{else}}Finding {{.ID}}{{end}}</h2><p>{{.ClaimType}} · {{.Status}} · PoC: {{.PoCStatus}} · confidence: {{.Confidence}}</p><small>Source event {{.SourceEventID}} · repeat event {{.ReproductionEventID}} · review event {{.ReviewEventID}} · duplicate of {{.DuplicateOf}}</small>{{if .CVSSVector}}<p>Provisional CVSS v4: {{.CVSSVector}} ({{.CVSSScore}})</p>{{end}}{{with .Detail}}<dl><dt>Asset</dt><dd>{{.AssetLabel}}</dd><dt>CWE</dt><dd>{{.CWE}}</dd><dt>Observed</dt><dd>{{.Observed}}</dd><dt>Expected</dt><dd>{{.Expected}}</dd><dt>Preconditions</dt><dd>{{.Preconditions}}</dd><dt>Impact assessment</dt><dd>{{.Impact}}</dd>{{if .EvidenceExcerpt}}<dt>Operator-reviewed evidence excerpt</dt><dd>{{.EvidenceExcerpt}}</dd>{{end}}{{if .PoCExplanation}}<dt>PoC explanation</dt><dd>{{.PoCExplanation}}</dd>{{end}}<dt>Operator validation plan</dt><dd>{{.ValidationPlan}}</dd><dt>Remediation</dt><dd>{{.Remediation}}</dd><dt>Business priority</dt><dd>{{.BusinessPriority}}</dd>{{if .CVSSRationale}}<dt>CVSS metric rationale</dt>{{range $metric,$why := .CVSSRationale}}<dd>{{$metric}}: {{$why}}</dd>{{end}}{{end}}</dl>{{end}}</article>{{end}}</html>`

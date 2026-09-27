@@ -1,6 +1,7 @@
 package orchestrator
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"net/http"
@@ -20,6 +21,90 @@ import (
 
 func testBudget() agent.Budget {
 	return agent.Budget{MaxSteps: 4, MaxTools: 2, MaxInputTokens: 1000000, MaxOutputTokens: 100, MaxContextBytes: 65536, MaxCostMicroUSD: 1000000, InputPriceMicroUSDPerMillion: 1000000, OutputPriceMicroUSDPerMillion: 1000000, KnownPrice: true}
+}
+
+func TestApprovedPlanCannotResumeWithoutMatchingApproval(t *testing.T) {
+	ctx := context.Background()
+	st, err := store.OpenWithEvidenceKey(filepath.Join(t.TempDir(), "shadow.db"), bytes.Repeat([]byte{6}, 32))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st.Close()
+	rules := policy.TrustedRules{Version: 1, Origin: "https://example.com", Actions: []policy.ActionRule{{URL: "https://example.com/", Method: "GET", Effect: policy.EffectRead}}}
+	key := bytes.Repeat([]byte{9}, 32)
+	approval, err := policy.SignRuleApproval(rules, key, time.Now())
+	if err != nil {
+		t.Fatal(err)
+	}
+	verified, err := policy.VerifyApprovedRules(rules, approval, key, time.Now())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := st.StartApprovedRun(ctx, "approved", verified); err != nil {
+		t.Fatal(err)
+	}
+	route := config.Route{Provider: "fixture", Model: "test", BaseURL: "http://127.0.0.1:1", Protocol: "openai-chat"}
+	routeJSON, _ := json.Marshal(route)
+	budgetJSON, _ := json.Marshal(testBudget())
+	if err := st.CreateAgentPlan(ctx, "approved", store.PromptDigest("Task"), routeJSON, budgetJSON, roles); err != nil {
+		t.Fatal(err)
+	}
+	s := Scheduler{Store: st, Route: route, Key: "fixture-key", Budget: testBudget()}
+	if err := s.RunPending(ctx, "approved", "Task"); err == nil {
+		t.Fatal("approved run resumed without approval")
+	}
+	other := policy.TrustedRules{Version: 1, Origin: rules.Origin, Actions: []policy.ActionRule{{URL: "https://example.com/other", Method: "GET", Effect: policy.EffectRead}}}
+	otherApproval, _ := policy.SignRuleApproval(other, key, time.Now())
+	changed, err := policy.VerifyApprovedRules(other, otherApproval, key, time.Now())
+	if err != nil {
+		t.Fatal(err)
+	}
+	s.ApprovedReads = &changed
+	if err := s.RunPending(ctx, "approved", "Task"); err == nil {
+		t.Fatal("changed approval resumed existing run")
+	}
+}
+
+func TestApprovedRunPreflightRejectsBlockedDestinationBeforeProvider(t *testing.T) {
+	ctx := context.Background()
+	st, err := store.OpenWithEvidenceKey(filepath.Join(t.TempDir(), "shadow.db"), bytes.Repeat([]byte{6}, 32))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st.Close()
+	var calls atomic.Int32
+	provider := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		calls.Add(1)
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer provider.Close()
+	rules := policy.TrustedRules{Version: 1, Origin: "http://127.0.0.1:1", Actions: []policy.ActionRule{{URL: "http://127.0.0.1:1/", Method: "GET", Effect: policy.EffectRead}}}
+	key := bytes.Repeat([]byte{9}, 32)
+	approval, err := policy.SignRuleApproval(rules, key, time.Now())
+	if err != nil {
+		t.Fatal(err)
+	}
+	verified, err := policy.VerifyApprovedRules(rules, approval, key, time.Now())
+	if err != nil {
+		t.Fatal(err)
+	}
+	s := Scheduler{Store: st, Route: config.Route{Provider: "fixture", Model: "test", BaseURL: provider.URL, Protocol: "openai-chat"}, Key: "fixture-key", Budget: testBudget(), ApprovedReads: &verified}
+	runID, err := s.Start(ctx, "Task", rules.Origin)
+	if err == nil || !strings.Contains(err.Error(), "disallowed destination") {
+		t.Fatalf("blocked target preflight result: %v", err)
+	}
+	if calls.Load() != 0 {
+		t.Fatalf("provider called %d times before target preflight", calls.Load())
+	}
+	plan, err := st.AgentPlan(ctx, runID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, job := range plan.Jobs {
+		if job.Status != "pending" {
+			t.Fatalf("preflight changed job state: %#v", job)
+		}
+	}
 }
 
 func TestSchedulerRunsIndependentJobsAndPersistsBudgets(t *testing.T) {

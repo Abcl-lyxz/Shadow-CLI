@@ -1,8 +1,10 @@
 # Typed network and session contract
 
-This document defines the next runtime boundary. It does not grant live target
-access. The shipped UI has no network actions, and model-generated shell
-commands still run in Docker with networking disabled.
+This document defines the runtime boundary. The shipped UI defaults to no
+network grants. An operator can load a locally signed exact GET/read plan into
+the TUI; only its surface agent receives action IDs and the host gateway
+enforces every hop. Model-generated shell commands still run in Docker with
+networking disabled. Public authentication and writes remain unavailable.
 
 ## Authentication and sessions
 
