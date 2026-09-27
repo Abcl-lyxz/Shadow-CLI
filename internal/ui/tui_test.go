@@ -100,6 +100,45 @@ func TestConnectReusesExistingProviderCredentialWithoutPrompting(t *testing.T) {
 	}
 }
 
+func TestKeyRotateReplacesCredentialAndKeepsRoute(t *testing.T) {
+	keyring.MockInit()
+	if err := config.SetKey("CyberAPI", "old-fixture-key"); err != nil {
+		t.Fatal(err)
+	}
+	route := config.Route{Provider: "CyberAPI", BaseURL: "provider.example/v1", Model: "selected-model", Protocol: "openai-chat"}
+	m := &Model{cfg: config.Config{Version: 1, Route: route}, verifiedToolRoute: route, endpointModels: map[string]bool{"selected-model": true}}
+	m.running = true
+	m.handle("/key rotate")
+	if m.secret {
+		t.Fatal("active run accepted key rotation")
+	}
+	m.running = false
+	m.handle("/key rotate")
+	if !m.secret || !m.pendingKeyRotate {
+		t.Fatal("key rotation did not open hidden input")
+	}
+	m.input = []rune("new-fixture-key")
+	if strings.Contains(m.View().Content, "new-fixture-key") {
+		t.Fatal("replacement key was visible before submission")
+	}
+	m.Update(tea.KeyPressMsg(tea.Key{Code: tea.KeyEnter}))
+	if got, err := config.Key("CyberAPI"); err != nil || got != "new-fixture-key" {
+		t.Fatalf("replacement key unavailable: %v", err)
+	}
+	if m.cfg.Route != route || m.verifiedToolRoute != (config.Route{}) || m.endpointModels != nil || m.secret || m.pendingKeyRotate {
+		t.Fatal("key rotation altered route or retained old capability evidence")
+	}
+	for _, line := range m.lines {
+		if strings.Contains(line, "new-fixture-key") {
+			t.Fatal("replacement key appeared in TUI log")
+		}
+	}
+	m.Update(probeMsg{route: route, ok: true, epoch: 0})
+	if m.verifiedToolRoute != (config.Route{}) {
+		t.Fatal("pre-rotation probe revalidated the new key")
+	}
+}
+
 func TestAgentBudgetRequiresKnownModelPrice(t *testing.T) {
 	m := &Model{cfg: config.Config{Route: config.Route{Provider: "fixture", Model: "priced"}}}
 	if _, err := m.agentBudget(); err == nil {

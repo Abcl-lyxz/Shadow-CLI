@@ -45,11 +45,13 @@ type modelMsg struct {
 	ids   []string
 	err   error
 	route config.Route
+	epoch uint64
 }
 type probeMsg struct {
 	route config.Route
 	ok    bool
 	err   error
+	epoch uint64
 }
 
 type Model struct {
@@ -71,6 +73,8 @@ type Model struct {
 	secret            bool
 	pendingID         string
 	pendingAPI        string
+	pendingKeyRotate  bool
+	credentialEpoch   uint64
 	target            string
 	workspace         string
 	dashboardURL      string
@@ -240,7 +244,7 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.showPane(m.pane)
 		}
 	case modelMsg:
-		if v.route != m.cfg.Route {
+		if v.route != m.cfg.Route || v.epoch != m.credentialEpoch {
 			break
 		}
 		if v.err != nil {
@@ -254,7 +258,7 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.add("Endpoint models: " + strings.Join(limitStrings(v.ids, 20), ", "))
 		}
 	case probeMsg:
-		if v.route != m.cfg.Route {
+		if v.route != m.cfg.Route || v.epoch != m.credentialEpoch {
 			break
 		}
 		if v.err != nil {
@@ -299,7 +303,14 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.secret = false
 				if err := config.SetKey(m.pendingID, input); err != nil {
 					m.add("Credential storage failed: " + err.Error())
+				} else if m.pendingKeyRotate {
+					m.credentialEpoch++
+					m.verifiedToolRoute = config.Route{}
+					m.endpointModels = nil
+					m.endpointRoute = config.Route{}
+					m.add("Updated " + m.pendingID + " API key in the OS keyring. Route and model are unchanged. Run /models refresh and /models probe before a task.")
 				} else {
+					m.credentialEpoch++
 					m.cfg.Route = config.Route{Provider: m.pendingID, BaseURL: m.pendingAPI, Protocol: "openai-chat"}
 					if err := config.Save(m.cfg); err != nil {
 						m.add("Config save failed: " + err.Error())
@@ -307,7 +318,7 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 						m.add("Connected " + m.pendingID + ". Choose a model with /models <id>.")
 					}
 				}
-				m.pendingID, m.pendingAPI = "", ""
+				m.pendingID, m.pendingAPI, m.pendingKeyRotate = "", "", false
 				return m, nil
 			}
 			if input != "" {
@@ -338,7 +349,7 @@ func (m *Model) handle(input string) {
 		fields := strings.Fields(input)
 		switch fields[0] {
 		case "/help":
-			m.add("Setup: /connect [search TEXT|provider [base-url]]; /models [search TEXT|id|refresh|probe]; /price IN OUT")
+			m.add("Setup: /connect [search TEXT|provider [base-url]]; /key rotate; /models [search TEXT|id|refresh|probe]; /price IN OUT")
 			m.add("Scope: /target URL; /scope; /rules FILE APPROVAL; /rules clear; /attach DIR; /artifact FILE; /skills")
 			m.add("Views: /board; /trace; /memory; /findings; /budget; /agents [run-id]; /dashboard")
 			m.add("Control: /pause; /stop; /recover ID; /review ID ROLE OUTCOME; /resume ID original-task; /quit")
@@ -400,6 +411,21 @@ func (m *Model) handle(input string) {
 			m.endpointModels = nil
 			m.verifiedToolRoute = config.Route{}
 			m.add("Enter API key for " + id + " (input hidden):")
+		case "/key":
+			if len(fields) != 2 || fields[1] != "rotate" {
+				m.add("Usage: /key rotate")
+				return
+			}
+			if m.running {
+				m.add("Pause the active run before rotating its provider key.")
+				return
+			}
+			if m.cfg.Route.Provider == "" {
+				m.add("Select a provider before rotating its key.")
+				return
+			}
+			m.pendingID, m.pendingAPI, m.pendingKeyRotate, m.secret = m.cfg.Route.Provider, "", true, true
+			m.add("Enter replacement API key for " + m.pendingID + " (input hidden):")
 		case "/models":
 			if len(fields) > 1 && fields[1] == "search" {
 				if len(fields) < 3 {
@@ -445,6 +471,7 @@ func (m *Model) handle(input string) {
 					return
 				}
 				route := m.cfg.Route
+				epoch := m.credentialEpoch
 				go func() {
 					ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 					defer cancel()
@@ -454,7 +481,7 @@ func (m *Model) handle(input string) {
 					tool.Function.Parameters = json.RawMessage(`{"type":"object","properties":{}}`)
 					msg, usage, err := (provider.Client{BaseURL: route.BaseURL, Key: key}).ChatWithUsageLimit(ctx, route.Model, []provider.Message{{Role: "user", Content: "Call shadow_capability_probe with {}. No target data is involved."}}, []provider.Tool{tool}, 64)
 					ok := usage.Known && len(msg.ToolCalls) == 1 && msg.ToolCalls[0].Type == "function" && msg.ToolCalls[0].Function.Name == tool.Function.Name && json.Valid([]byte(msg.ToolCalls[0].Function.Arguments))
-					m.send(probeMsg{route: route, ok: ok, err: err})
+					m.send(probeMsg{route: route, ok: ok, err: err, epoch: epoch})
 				}()
 				m.add("Checking model tool calls and usage reporting...")
 				return
@@ -466,11 +493,12 @@ func (m *Model) handle(input string) {
 					return
 				}
 				route := m.cfg.Route
+				epoch := m.credentialEpoch
 				go func() {
 					ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
 					defer cancel()
 					ids, err := (provider.Client{BaseURL: route.BaseURL, Key: key}).Models(ctx)
-					m.send(modelMsg{ids: ids, err: err, route: route})
+					m.send(modelMsg{ids: ids, err: err, route: route, epoch: epoch})
 				}()
 				return
 			}
