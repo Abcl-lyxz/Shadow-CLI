@@ -121,9 +121,9 @@ encrypted evidence. The controlled-target suite and release review remain open.
     provenance-checked plugin API.
 
 - [ ] **Phase 8 — Release evidence and packaging**
-  - [x] Historical CI passed on commit `c407157`; local
-    Windows tests and cross-builds passed for the current development slices.
-    This does not cover the current working tree in CI.
+  - [x] CI passed on the 2026-09-27 code commit `c0fadd4` for Windows,
+    macOS, Linux, and the Linux Docker isolation job. Local Windows tests
+    and cross-builds passed; native interactive drills remain open.
   - [ ] Pin the image and packages; review its SBOM, licenses, vulnerabilities,
     signature, and 300+ tool inventory on the release artifact.
   - [ ] Run current-code CLI and Docker integration on Windows, macOS, and
