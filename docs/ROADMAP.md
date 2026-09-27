@@ -128,7 +128,7 @@ controlled-target suite and release review remain open.
     provenance-checked plugin API.
 
 - [ ] **Phase 8 — Release evidence and packaging**
-  - [x] CI passed on the 2026-09-27 code commit `f76462b` for Windows,
+  - [x] CI passed on the 2026-09-27 code commit `3561c9b` for Windows,
     macOS, Linux, and the Linux Docker isolation job. Local Windows tests
     and cross-builds passed; native interactive drills remain open.
   - [ ] Pin the image and packages; review its SBOM, licenses, vulnerabilities,
