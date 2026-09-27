@@ -715,7 +715,7 @@ func reportCommand(args []string) error {
 	if preview {
 		fmt.Printf("Reviewed report: run=%s findings=%d digest=%s\n", doc.RunID, len(doc.Findings), digest)
 		if detailFile != "" {
-			b, err := report.Render(doc, "json")
+			b, err := json.MarshalIndent(doc, "", "  ")
 			if err != nil {
 				return err
 			}

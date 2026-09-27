@@ -162,6 +162,11 @@ func TestAgentBudgetRequiresKnownModelPrice(t *testing.T) {
 	if err != nil || budget.InputPriceMicroUSDPerMillion != 1250000 || budget.OutputPriceMicroUSDPerMillion != 3000000 {
 		t.Fatalf("manual budget %#v %v", budget, err)
 	}
+	m.handle("/price 0 0")
+	budget, err = m.agentBudget()
+	if err != nil || !budget.KnownPrice || budget.InputPriceMicroUSDPerMillion != 0 || budget.OutputPriceMicroUSDPerMillion != 0 || budget.MaxInputTokens == 0 || budget.MaxOutputTokens == 0 {
+		t.Fatalf("operator-declared free route lost finite token limits: %#v %v", budget, err)
+	}
 }
 
 func TestModelsCommandStillListsCatalogModels(t *testing.T) {

@@ -27,6 +27,8 @@ jobs:
           fi
       - name: Test
         run: go test ./...
+      - name: Dashboard report integrity
+        run: node --test internal/dashboard/app.test.mjs
       - name: Vet
         run: go vet ./...
       - name: Build

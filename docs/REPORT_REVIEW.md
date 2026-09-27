@@ -105,6 +105,11 @@ embeds an OFL-licensed Noto Sans Thai font for Latin and Thai text and refuses
 unsupported glyphs instead of replacing them. The file remains on the
 operator's machine and is not placed in the active database. The dashboard
 can open a digest-approved JSON export locally to show matching reviewed detail;
-the file stays in the browser tab and is matched against run, finding, source,
-and review event IDs. No report format claims a verified vulnerability from a
-response observation or an operator's prose alone.
+enter the exact 64-character digest from `report preview` in the dashboard before
+selecting the file. The dashboard hashes the local file bytes and refuses a
+mismatch before parsing the report. It also matches the run, finding, source,
+and review event IDs. The file stays in the browser tab. JSON exported by older
+CLI builds must be previewed and exported again with the current CLI because
+the current export bytes are the exact bytes covered by the preview digest.
+No report format claims a verified vulnerability from a response observation
+or an operator's prose alone.

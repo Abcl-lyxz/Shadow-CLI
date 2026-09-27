@@ -235,7 +235,9 @@ func Render(doc Document, format string) ([]byte, error) {
 	}
 	switch format {
 	case "json":
-		return json.MarshalIndent(doc, "", "  ")
+		// The exported bytes match Digest(doc), so a dashboard can verify the
+		// operator-confirmed preview digest before showing local narrative.
+		return json.Marshal(doc)
 	case "sarif":
 		type result struct {
 			RuleID     string            `json:"ruleId"`

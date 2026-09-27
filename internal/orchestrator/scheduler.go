@@ -198,6 +198,17 @@ func (s *Scheduler) RunPending(ctx context.Context, runID, prompt string) error 
 			if states[role] != "pending" {
 				return fmt.Errorf("agent %s requires outcome review (%s)", role, states[role])
 			}
+			if role == "source" && s.Workspace == "" {
+				// No source attachment exists to inspect. Record the skipped role
+				// durably so verification may proceed without a purposeless tool loop.
+				if err := s.Store.AgentJobTransition(ctx, runID, role, "pending", "running", "claimed", 0, 0, 0, 0, 0); err != nil {
+					return err
+				}
+				if err := s.Store.AgentJobTransition(ctx, runID, role, "running", "done", "skipped_no_attachment", 0, 0, 0, 0, 0); err != nil {
+					return err
+				}
+				continue
+			}
 			wg.Add(1)
 			go func(role string) {
 				defer wg.Done()
@@ -232,14 +243,24 @@ func (s *Scheduler) runJob(ctx context.Context, runID, role, prompt, origin stri
 	if !found {
 		return errors.New("agent job not found")
 	}
+	allowedTools := roleTools[role]
+	if s.Workspace == "" && (role == "verify" || role == "report") {
+		// With no attached source, these roles can assess the already saved
+		// evidence but have no independent action to perform through a tool.
+		allowedTools = map[string]bool{}
+	}
+	evidenceContext := ""
+	if role == "verify" || role == "report" {
+		evidenceContext, err = s.recordedEvidenceContext(ctx, runID)
+		if err != nil {
+			return err
+		}
+	}
 	if err := s.Store.AgentJobTransition(ctx, runID, role, "pending", "running", "claimed", initial.Step, initial.InputTokens, initial.OutputTokens, initial.CostMicroUSD, initial.ToolCalls); err != nil {
 		return err
 	}
 	last := initial
-	if role != "surface" {
-		approved = nil
-	}
-	r := agent.Runner{RunID: runID, Role: role, Route: s.Route, Key: s.Key, Workspace: s.Workspace, Store: s.Store, Sandbox: s.Sandbox, Notify: s.Notify, Budget: &s.Budget, AllowedTools: roleTools[role],
+	r := agent.Runner{RunID: runID, Role: role, Route: s.Route, Key: s.Key, Workspace: s.Workspace, Store: s.Store, Sandbox: s.Sandbox, Notify: s.Notify, Budget: &s.Budget, AllowedTools: allowedTools,
 		ApprovedReads: approved,
 		Initial:       initial,
 		Checkpoint: func(ctx context.Context, c agent.Checkpoint) error {
@@ -247,7 +268,7 @@ func (s *Scheduler) runJob(ctx context.Context, runID, role, prompt, origin stri
 			return s.Store.AgentJobTransition(ctx, runID, role, "running", "running", c.Phase, c.Step, c.InputTokens, c.OutputTokens, c.CostMicroUSD, c.ToolCalls)
 		},
 	}
-	_, err = r.Run(ctx, "Role: "+role+". "+roleTask[role]+"\nUser task: "+prompt, origin)
+	_, err = r.Run(ctx, "Role: "+role+". "+roleTask[role]+evidenceContext+"\nUser task: "+prompt, origin)
 	status, phase := "done", "completed"
 	if err != nil {
 		status, phase = "interrupted", "outcome_unknown"
@@ -260,6 +281,35 @@ func (s *Scheduler) runJob(ctx context.Context, runID, role, prompt, origin stri
 		return fmt.Errorf("agent %s interrupted: %w", role, err)
 	}
 	return nil
+}
+
+func (s *Scheduler) recordedEvidenceContext(ctx context.Context, runID string) (string, error) {
+	events, err := s.Store.Events(ctx, runID)
+	if err != nil {
+		return "", err
+	}
+	var b strings.Builder
+	b.WriteString("\nRecorded response metadata (raw URL, headers, and body withheld):")
+	count := 0
+	for _, event := range events {
+		if event.Kind != "observation" {
+			continue
+		}
+		if count == 20 {
+			b.WriteString("\n- Further observations omitted.")
+			break
+		}
+		summary, _, err := s.Store.ValidatedObservation(ctx, runID, event.ID)
+		if err != nil {
+			return "", fmt.Errorf("recorded observation %d is invalid: %w", event.ID, err)
+		}
+		fmt.Fprintf(&b, "\n- event %d: status %d, bytes %d, URL SHA-256 %s, body SHA-256 %s, truncated %t", event.ID, summary.Status, summary.Bytes, summary.URLSHA256, summary.SHA256, summary.Truncated)
+		count++
+	}
+	if count == 0 {
+		b.WriteString(" none")
+	}
+	return b.String(), nil
 }
 
 func (s *Scheduler) Recover(ctx context.Context, runID string) (store.AgentPlan, error) {

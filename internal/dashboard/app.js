@@ -4,6 +4,7 @@ const titleNode = document.querySelector("#title");
 const countNode = document.querySelector("#count");
 const findingsNode = document.querySelector("#findings");
 const reviewFile = document.querySelector("#review-file");
+const reviewDigest = document.querySelector("#review-digest");
 const reviewState = document.querySelector("#review-state");
 let reviewedReport = null;
 let activeRun = "";
@@ -68,6 +69,12 @@ async function selectRun(id) {
   }
 }
 
+reviewDigest.addEventListener("input", () => {
+  reviewedReport = null;
+  reviewState.textContent = "Preview digest changed. Select the JSON report again.";
+  if (activeRun) selectRun(activeRun);
+});
+
 reviewFile.addEventListener("change", async () => {
   reviewedReport = null;
   const file = reviewFile.files?.[0];
@@ -77,10 +84,18 @@ reviewFile.addEventListener("change", async () => {
     return;
   }
   try {
-    const candidate = JSON.parse(await file.text());
+    const expected = reviewDigest.value.trim().toLowerCase();
+    if (!/^[0-9a-f]{64}$/.test(expected)) throw new Error("Enter the 64-character digest from report preview first.");
+    if (!globalThis.crypto?.subtle) throw new Error("Browser SHA-256 verification is unavailable.");
+    const bytes = await file.arrayBuffer();
+    const hash = await crypto.subtle.digest("SHA-256", bytes);
+    const actual = Array.from(new Uint8Array(hash), byte => byte.toString(16).padStart(2, "0")).join("");
+    if (actual !== expected) throw new Error("Report bytes differ from the confirmed preview digest. Re-export with the current CLI and verify the digest.");
+    const candidate = JSON.parse(new TextDecoder("utf-8", { fatal: true }).decode(bytes));
+    if (reviewDigest.value.trim().toLowerCase() !== expected) throw new Error("Preview digest changed during file verification.");
     if (candidate.schema !== "shadow-report-v1" || candidate.run_id !== activeRun || !Array.isArray(candidate.findings) || candidate.findings.length > 50) throw new Error("Report does not match this run.");
     reviewedReport = candidate;
-    reviewState.textContent = "Local reviewed report loaded for " + activeRun + ". Check its export digest before use.";
+    reviewState.textContent = "Report SHA-256 matches the confirmed preview digest for " + activeRun + ".";
     await selectRun(activeRun);
   } catch (error) {
     reviewState.textContent = error.message;

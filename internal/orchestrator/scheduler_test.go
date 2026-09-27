@@ -3,10 +3,13 @@ package orchestrator
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -156,7 +159,7 @@ func TestSchedulerRunsIndependentJobsAndPersistsBudgets(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer st.Close()
-	s := Scheduler{Store: st, Route: config.Route{Provider: "fixture", BaseURL: server.URL, Model: "test", Protocol: "openai-chat"}, Key: "test-key", Budget: testBudget()}
+	s := Scheduler{Store: st, Route: config.Route{Provider: "fixture", BaseURL: server.URL, Model: "test", Protocol: "openai-chat"}, Key: "test-key", Budget: testBudget(), Workspace: t.TempDir()}
 	id, err := s.Start(ctx, "Inspect only local evidence", "https://example.com")
 	if err != nil {
 		t.Fatal(err)
@@ -196,6 +199,77 @@ func TestSchedulerRunsIndependentJobsAndPersistsBudgets(t *testing.T) {
 		if strings.Contains(string(event.Payload), "Inspect only local evidence") || strings.Contains(string(event.Payload), "test-key") {
 			t.Fatal("task text or key was persisted")
 		}
+	}
+}
+
+func TestNoAttachmentSkipsSourceAndRunsVerification(t *testing.T) {
+	var calls atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		calls.Add(1)
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"choices":[{"message":{"role":"assistant","content":"done"}}],"usage":{"prompt_tokens":20,"completion_tokens":3}}`))
+	}))
+	defer server.Close()
+	st, err := store.Open(filepath.Join(t.TempDir(), "shadow.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st.Close()
+	s := Scheduler{Store: st, Route: config.Route{Provider: "fixture", BaseURL: server.URL, Model: "test", Protocol: "openai-chat"}, Key: "test-key", Budget: testBudget()}
+	id, err := s.Start(context.Background(), "Inspect the available evidence", "https://example.com")
+	if err != nil {
+		t.Fatal(err)
+	}
+	plan, err := st.AgentPlan(context.Background(), id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if calls.Load() != 3 {
+		t.Fatalf("provider calls=%d, want surface/verify/report only", calls.Load())
+	}
+	for _, job := range plan.Jobs {
+		if job.Status != "done" {
+			t.Fatalf("unfinished job: %#v", job)
+		}
+		if job.Role == "source" && (job.Phase != "skipped_no_attachment" || job.Step != 0 || job.ToolCalls != 0 || job.InputTokens != 0 || job.OutputTokens != 0) {
+			t.Fatalf("source without attachment used provider or tools: %#v", job)
+		}
+	}
+}
+
+func TestRecordedEvidenceContextContainsOnlyValidatedMetadata(t *testing.T) {
+	ctx := context.Background()
+	st, err := store.OpenWithEvidenceKey(filepath.Join(t.TempDir(), "shadow.db"), bytes.Repeat([]byte{0x42}, 32))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st.Close()
+	scope, err := policy.FromTarget("https://example.com")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := st.StartRun(ctx, "run", scope, nil); err != nil {
+		t.Fatal(err)
+	}
+	url := "https://example.com/private-route"
+	body := []byte("private@example.com")
+	raw, err := json.Marshal(store.RawHTTP{RequestURL: url, Method: "GET", Status: 200, Header: http.Header{"Content-Type": {"text/plain"}}, Body: body})
+	if err != nil {
+		t.Fatal(err)
+	}
+	urlHash, bodyHash := sha256.Sum256([]byte(url)), sha256.Sum256(body)
+	summary := store.EvidenceSummary{Origin: scope.Origin, URLSHA256: hex.EncodeToString(urlHash[:]), Status: 200, ContentType: "text/plain", Bytes: len(body), SHA256: hex.EncodeToString(bodyHash[:])}
+	id, err := st.RecordObservation(ctx, "run", summary, raw)
+	if err != nil {
+		t.Fatal(err)
+	}
+	s := Scheduler{Store: st}
+	contextText, err := s.recordedEvidenceContext(ctx, "run")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(contextText, "event "+strconv.FormatInt(id, 10)) || !strings.Contains(contextText, summary.SHA256) || strings.Contains(contextText, "private-route") || strings.Contains(contextText, string(body)) {
+		t.Fatalf("unsafe or incomplete evidence context: %s", contextText)
 	}
 }
 

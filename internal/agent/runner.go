@@ -162,7 +162,10 @@ func (r *Runner) Run(ctx context.Context, prompt, target string) (string, error)
 	if fixtureReads != nil {
 		fixtureHint = "\nApproved local fixture read action IDs: " + strings.Join(fixtureReads.ReadActionIDs(), ", ")
 	}
-	if r.ApprovedReads != nil {
+	// Every role must retain the approved run binding. Only an explicitly
+	// allowed role sees action IDs or can dispatch the read tool.
+	canApprovedRead := r.ApprovedReads != nil && (r.AllowedTools == nil || r.AllowedTools["approved_http_read"])
+	if canApprovedRead {
 		fixtureHint = "\nOperator-approved exact GET/read action IDs: " + strings.Join(r.ApprovedReads.ReadActionIDs(), ", ")
 	}
 	llm := provider.Client{BaseURL: r.Route.BaseURL, Key: r.Key}
@@ -216,7 +219,7 @@ func (r *Runner) Run(ctx context.Context, prompt, target string) (string, error)
 	if fixtureReads != nil {
 		tools = append(tools, tool("fixture_http_read", "Read one approved local fixture action by its ID. Returns only evidence metadata.", map[string]any{"action_id": map[string]string{"type": "string"}}, []string{"action_id"}))
 	}
-	if r.ApprovedReads != nil {
+	if canApprovedRead {
 		tools = append(tools, tool("approved_http_read", "Read one operator-approved exact GET action by its ID. Returns only evidence metadata; never supply a URL.", map[string]any{"action_id": map[string]string{"type": "string"}}, []string{"action_id"}))
 	}
 	if r.AllowedTools != nil {

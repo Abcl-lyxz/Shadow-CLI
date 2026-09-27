@@ -18,15 +18,21 @@ The independent Phase 5 orchestration and recovery work is complete for the
 local development scope; Phase 4 still gates public-target agent actions.
 Phase 7 development workflows are complete. The current-code CI run tests
 TUI capability/cache logic on Windows, macOS, and Linux and passes Docker
-isolation on Linux. Native interactive TUI/keyring drills and real-provider
-routing remain Phase 8 release evidence, not production claims.
+isolation on Linux. A bounded Windows real-provider agent drill now passes for
+one approved homepage action; native interactive TUI/keyring drills and broader
+release routing remain Phase 8 evidence, not production claims.
 The next unchecked item is production gateway mediation for every target-capable
 tool, including target-specific authentication and reversible writes. The broker
 has typed run-bound loopback actions and a locally approved read-only API. The
 TUI can load a signed exact GET/read plan and expose only action IDs to its
 surface agent; the default run has no network grant. This path has local policy
-tests but no public-target agent drill. One earlier authorized homepage read has
-encrypted evidence. The controlled-target suite and release review remain open.
+tests and one bounded public-homepage agent drill with CyberAPI. The drill
+recorded a 200 response and passed evidence/provenance audit; it did not verify
+a vulnerability. On 2026-09-27 the operator expanded authorization to
+anonymous public routes on the exact `https://pteachlab.com` origin; an
+operator-authored exact-action plan and its local approval are still required
+before another Shadow request. No Google-login account is available. The
+controlled-target suite and release review remain open.
 
 - [x] **Phase 0 — Local development foundation**
   - [x] Go CLI and TUI development shell, provider/model catalog, OS-keyring
@@ -101,14 +107,15 @@ encrypted evidence. The controlled-target suite and release review remain open.
     finding from already saved GET evidence, review it locally, and export a
     digest-approved report without another network request.
   - [ ] Verify vulnerabilities and impact from actual authorized target
-    evidence. The owner currently authorizes only one homepage read; this
-    cannot prove a security issue or PoC impact.
+    evidence. Authorization now covers anonymous public routes on one origin,
+    but the saved homepage response cannot prove a security issue or PoC impact.
   - [ ] Integrate reviewed detail and safely redacted evidence excerpts into
     the finding UI, validate safe PoC explanations
     and full reports on an authorized controlled target, and support Unicode
     narrative in PDF without exposing sensitive target data. A local JSON report
     import and embedded Thai/Latin PDF font now cover the development path;
-    controlled-target review and broader font coverage remain open.
+    controlled-target review and broader font coverage remain open. The local
+    JSON import now checks the exact preview digest before displaying detail.
 
 - [x] **Phase 7 — Product workflows**
   - [x] Basic `/connect`, provider/model selection, target/attachment commands,
@@ -121,13 +128,16 @@ encrypted evidence. The controlled-target suite and release review remain open.
     provenance-checked plugin API.
 
 - [ ] **Phase 8 — Release evidence and packaging**
-  - [x] CI passed on the 2026-09-27 code commit `c0fadd4` for Windows,
+  - [x] CI passed on the 2026-09-27 code commit `f76462b` for Windows,
     macOS, Linux, and the Linux Docker isolation job. Local Windows tests
     and cross-builds passed; native interactive drills remain open.
   - [ ] Pin the image and packages; review its SBOM, licenses, vulnerabilities,
-    signature, and 300+ tool inventory on the release artifact.
+    signature, and 300+ tool inventory on the release artifact. The current
+    development image has an SPDX SBOM and preliminary scanner results, with
+    substantial unresolved license and vulnerability review.
   - [ ] Run current-code CLI and Docker integration on Windows, macOS, and
     Linux, real provider routing with a test credential, and the full negative
-    policy suite.
+    policy suite. A bounded Windows CyberAPI four-role run succeeded against
+    the previously approved exact homepage action; other native drills remain.
   - [ ] Record passing evidence for every release gate in `CURRENT_STATUS.md`
     and complete a release review before making a production claim.

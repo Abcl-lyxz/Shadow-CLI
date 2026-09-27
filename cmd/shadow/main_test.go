@@ -147,6 +147,10 @@ func TestIsolatedSavedObservationReviewAndReportWithoutNetwork(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	exported := sha256.Sum256(b)
+	if hex.EncodeToString(exported[:]) != digest {
+		t.Fatal("JSON export bytes differ from the confirmed preview digest")
+	}
 	if strings.Contains(string(b), body) || !strings.Contains(string(b), `"response_observation"`) {
 		t.Fatalf("isolated report content: %s", b)
 	}
